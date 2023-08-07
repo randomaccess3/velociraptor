@@ -289,6 +289,7 @@ LET ColumnTypes <= dict(
 */
 LET ERRORS = SELECT ClientId,
        client_info(client_id=ClientId).os_info.hostname AS Hostname,
+       timestamp(epoch=(client_info(client_id=ClientId).last_seen_at)) as LastSeen,
        FlowId, Flow.start_time As StartedTime,
        Flow.state AS FlowState, Flow.status as FlowStatus,
        Flow.execution_duration as Duration,
@@ -296,6 +297,7 @@ LET ERRORS = SELECT ClientId,
        Flow.total_collected_rows as TotalRows
 FROM hunt_flows(hunt_id=HuntId)
 WHERE FlowState =~ 'ERROR'
+ORDER BY LastSeen DESC
 
 -- Uncomment the below to reissue the exact same hunt to the errored clients
 -- SELECT *,
@@ -314,6 +316,7 @@ SELECT * FROM ERRORS
 */
 SELECT ClientId,
        client_info(client_id=ClientId).os_info.hostname AS Hostname,
+       timestamp(epoch=(client_info(client_id=ClientId).last_seen_at)) as LastSeen,
        FlowId, Flow.start_time As StartedTime,
        Flow.state AS FlowState, Flow.status as FlowStatus,
        Flow.execution_duration as Duration,
@@ -321,12 +324,14 @@ SELECT ClientId,
        Flow.total_collected_rows as TotalRows
 FROM hunt_flows(hunt_id=HuntId)
 WHERE FlowState =~ 'RUNNING'
+ORDER BY LastSeen DESC
 
 /*
 ## Flows with FINISHED status
 */
 SELECT ClientId,
        client_info(client_id=ClientId).os_info.hostname AS Hostname,
+       timestamp(epoch=(client_info(client_id=ClientId).last_seen_at)) as LastSeen,
        FlowId, Flow.start_time As StartedTime,
        Flow.state AS FlowState, Flow.status as FlowStatus,
        Flow.execution_duration as Duration,
@@ -335,6 +340,7 @@ SELECT ClientId,
 FROM hunt_flows(hunt_id=HuntId)
 WHERE FlowState =~ 'Finished'
 LIMIT 1000
+ORDER BY LastSeen DESC
 `})
 
 	return getDefaultCellsForSources(ctx, config_obj, sources, notebook_metadata)
