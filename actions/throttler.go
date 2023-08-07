@@ -8,16 +8,17 @@ package actions
 import (
 	"context"
 	"os"
+	"runtime"
 	"sync"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
-	"github.com/shirou/gopsutil/v3/cpu"
-	"github.com/shirou/gopsutil/v3/process"
 	"www.velocidex.com/golang/velociraptor/utils"
 	"www.velocidex.com/golang/vfilter"
 	"www.velocidex.com/golang/vfilter/types"
+
+	"www.velocidex.com/golang/velociraptor/vql/psutils"
 )
 
 var (
@@ -39,6 +40,8 @@ var (
 	// A Global stats collector is always running. When throttlers
 	// register with it they can read the data.
 	stats *statsCollector
+
+	throttle_mu sync.Mutex
 )
 
 type sample struct {
@@ -54,7 +57,8 @@ type statsCollector struct {
 	cond *sync.Cond
 	id   uint64
 
-	proc *process.Process
+	// Our own pid so we can check stats etc
+	pid int32
 
 	samples [2]sample
 
@@ -66,22 +70,12 @@ type statsCollector struct {
 	number_of_cores     float64
 }
 
-func newStatsCollector() (*statsCollector, error) {
-	proc, err := process.NewProcess(int32(os.Getpid()))
-	if err != nil || proc == nil {
-		return nil, err
-	}
-
-	number_of_cores, err := cpu.Counts(true)
-	if err != nil || number_of_cores <= 0 {
-		return nil, err
-	}
-
+func newStatsCollector(ctx context.Context) (*statsCollector, error) {
 	result := &statsCollector{
 		check_duration_msec: 300,
 		id:                  utils.GetId(),
-		proc:                proc,
-		number_of_cores:     float64(number_of_cores),
+		pid:                 int32(os.Getpid()),
+		number_of_cores:     float64(runtime.NumCPU()),
 	}
 	result.cond = sync.NewCond(&result.mu)
 
@@ -134,15 +128,15 @@ func (self *statsCollector) GetAverageIOPS() float64 {
 // process. This is called not that frequently in order to minimize
 // the overheads of making a system call.
 func (self *statsCollector) getCpuTime(ctx context.Context) float64 {
-	cpu_time, err := self.proc.TimesWithContext(ctx)
+	cpu_time, err := psutils.TimesWithContext(ctx, self.pid)
 	if err != nil {
 		return 0
 	}
-	return cpu_time.Total()
+	return cpu_time.User + cpu_time.System
 }
 
 func (self *statsCollector) getIops(ctx context.Context) float64 {
-	counters, err := self.proc.IOCountersWithContext(ctx)
+	counters, err := psutils.IOCountersWithContext(ctx, self.pid)
 	if err != nil {
 		return 0
 	}
@@ -238,12 +232,13 @@ func NewThrottler(
 	ctx context.Context, scope vfilter.Scope,
 	ops_per_sec, cpu_percent, iops_limit float64) types.Throttler {
 
-	if ops_per_sec > 0 {
+	if ops_per_sec > 0 && ops_per_sec < 100 {
 		cpu_percent = ops_per_sec
 	}
 
 	// cpu throttler can only work from 0 to 100%
-	if cpu_percent <= 0 || cpu_percent > 100 {
+	if cpu_percent < 0 || cpu_percent > 100 {
+		scope.Log("Throttler: Cpu limit %v outside range 0-100 , ignoring\n", cpu_percent)
 		cpu_percent = 0
 	}
 
@@ -251,12 +246,12 @@ func NewThrottler(
 		return &DummyThrottler{}
 	}
 
-	mu.Lock()
-	defer mu.Unlock()
+	throttle_mu.Lock()
+	defer throttle_mu.Unlock()
 
 	if stats == nil {
 		var err error
-		stats, err = newStatsCollector()
+		stats, err = newStatsCollector(ctx)
 		if err != nil {
 			return nil
 		}
@@ -265,7 +260,7 @@ func NewThrottler(
 	stats.mu.Lock()
 	throttlerCurrentGauge.Inc()
 	stats.waiters++
-	scope.Log("Will throttle query to %v%% of %v available CPU resources (%v cores long term average).",
+	scope.Log("Will throttle query to %.0f percent of %.0f available CPU resources (%0.02f cores long term average).",
 		cpu_percent, stats.number_of_cores,
 		cpu_percent*stats.number_of_cores/100)
 	stats.mu.Unlock()
@@ -295,12 +290,9 @@ func init() {
 				return stats.GetAverageIOPS()
 			}
 
-			proc, err := process.NewProcess(int32(os.Getpid()))
-			if err != nil || proc == nil {
-				return 0
-			}
-
-			counters, err := proc.IOCounters()
+			ctx := context.Background()
+			pid := int32(os.Getpid())
+			counters, err := psutils.IOCountersWithContext(ctx, pid)
 			if err != nil {
 				return 0
 			}
@@ -310,26 +302,19 @@ func init() {
 	_ = prometheus.Register(promauto.NewGaugeFunc(
 		prometheus.GaugeOpts{
 			Name: "process_cpu_used",
-			Help: "Current CPU utilization by this process",
+			Help: "Total CPU utilization by this process",
 		}, func() float64 {
 			if stats != nil {
 				return stats.GetAverageCPULoad()
 			}
 
-			proc, err := process.NewProcess(int32(os.Getpid()))
-			if err != nil || proc == nil {
-				return 0
-			}
-
-			number_of_cores, err := cpu.Counts(true)
-			if err != nil || number_of_cores <= 0 {
-				return 0
-			}
-
-			cpu_time, err := proc.CPUPercent()
+			ctx := context.Background()
+			pid := int32(os.Getpid())
+			number_of_cores := runtime.NumCPU()
+			cpu_time, err := psutils.TimesWithContext(ctx, pid)
 			if err != nil {
 				return 0
 			}
-			return cpu_time / float64(number_of_cores)
+			return float64(cpu_time.User+cpu_time.System) / float64(number_of_cores)
 		}))
 }

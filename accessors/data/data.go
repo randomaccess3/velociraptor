@@ -1,6 +1,6 @@
 /*
-   Velociraptor - Hunting Evil
-   Copyright (C) 2019 Velocidex Innovations.
+   Velociraptor - Dig Deeper
+   Copyright (C) 2019-2022 Rapid7 Inc.
 
    This program is free software: you can redistribute it and/or modify
    it under the terms of the GNU Affero General Public License as published
@@ -22,7 +22,7 @@ package data
 import (
 	"strings"
 
-	errors "github.com/pkg/errors"
+	"github.com/go-errors/errors"
 	"www.velocidex.com/golang/velociraptor/accessors"
 	"www.velocidex.com/golang/vfilter"
 )

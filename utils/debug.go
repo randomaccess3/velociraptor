@@ -1,7 +1,7 @@
 /*
 
-   Velociraptor - Hunting Evil
-   Copyright (C) 2019 Velocidex Innovations.
+   Velociraptor - Dig Deeper
+   Copyright (C) 2019-2022 Rapid7 Inc.
 
    This program is free software: you can redistribute it and/or modify
    it under the terms of the GNU Affero General Public License as published
@@ -19,6 +19,7 @@
 package utils
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"runtime/debug"
@@ -64,4 +65,22 @@ func DebugString(v interface{}) string {
 	default:
 		return fmt.Sprintf("%T %v", v, v)
 	}
+}
+
+// Check if a context is still valid
+func DebugCtx(ctx context.Context, name string) {
+	select {
+	case <-ctx.Done():
+		fmt.Printf(name + ": Ctx is done!\n")
+
+	default:
+		fmt.Printf(name + ": Ctx is still valid!\n")
+	}
+}
+
+func DebugLogWhenCtxDone(ctx context.Context, name string) {
+	go func() {
+		<-ctx.Done()
+		fmt.Printf(name + ": Ctx done!\n")
+	}()
 }

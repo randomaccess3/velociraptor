@@ -16,21 +16,23 @@ import (
 	actions_proto "www.velocidex.com/golang/velociraptor/actions/proto"
 	config_proto "www.velocidex.com/golang/velociraptor/config/proto"
 	crypto_proto "www.velocidex.com/golang/velociraptor/crypto/proto"
-	"www.velocidex.com/golang/velociraptor/datastore"
 	"www.velocidex.com/golang/velociraptor/file_store/test_utils"
 	flows_proto "www.velocidex.com/golang/velociraptor/flows/proto"
 	"www.velocidex.com/golang/velociraptor/paths"
 	"www.velocidex.com/golang/velociraptor/paths/artifacts"
 	"www.velocidex.com/golang/velociraptor/responder"
+	"www.velocidex.com/golang/velociraptor/result_sets"
 	"www.velocidex.com/golang/velociraptor/services"
 	"www.velocidex.com/golang/velociraptor/services/journal"
 	"www.velocidex.com/golang/velociraptor/uploads"
+	utils "www.velocidex.com/golang/velociraptor/utils"
 	vql_subsystem "www.velocidex.com/golang/velociraptor/vql"
 	"www.velocidex.com/golang/velociraptor/vtesting"
 
 	_ "www.velocidex.com/golang/velociraptor/accessors/file"
 	_ "www.velocidex.com/golang/velociraptor/accessors/ntfs"
 	_ "www.velocidex.com/golang/velociraptor/result_sets/timed"
+	"www.velocidex.com/golang/velociraptor/vql/acl_managers"
 	_ "www.velocidex.com/golang/velociraptor/vql/filesystem"
 	_ "www.velocidex.com/golang/velociraptor/vql/networking"
 	_ "www.velocidex.com/golang/velociraptor/vql/windows"
@@ -60,7 +62,7 @@ type TestSuite struct {
 
 func (self *TestSuite) SetupTest() {
 	self.TestSuite.SetupTest()
-	self.LoadArtifacts([]string{`
+	self.LoadArtifactsIntoConfig([]string{`
 name: System.Upload.Completion
 type: CLIENT_EVENT
 `, `
@@ -68,19 +70,18 @@ name: Generic.Client.Profile
 type: CLIENT
 `})
 
-	db, err := datastore.GetDB(self.ConfigObj)
+	client_info_manager, err := services.GetClientInfoManager(self.ConfigObj)
 	assert.NoError(self.T(), err)
 
-	client_path_manager := paths.NewClientPathManager(self.client_id)
-	client_info := &actions_proto.ClientInfo{
-		ClientId: self.client_id,
-	}
-	err = db.SetSubject(self.ConfigObj, client_path_manager.Path(), client_info)
-	assert.NoError(self.T(), err)
+	err = client_info_manager.Set(self.Ctx, &services.ClientInfo{
+		actions_proto.ClientInfo{
+			ClientId: self.client_id,
+		},
+	})
 }
 
 func (self *TestSuite) TestGetFlow() {
-	manager, err := services.GetRepositoryManager()
+	manager, err := services.GetRepositoryManager(self.ConfigObj)
 	assert.NoError(self.T(), err)
 
 	repository, err := manager.GetGlobalRepository(
@@ -98,8 +99,8 @@ func (self *TestSuite) TestGetFlow() {
 	}
 
 	// Schedule new flows.
-	ctx := context.Background()
-	launcher, err := services.GetLauncher()
+	ctx := self.Ctx
+	launcher, err := services.GetLauncher(self.ConfigObj)
 	assert.NoError(self.T(), err)
 
 	flow_ids := []string{}
@@ -108,7 +109,7 @@ func (self *TestSuite) TestGetFlow() {
 	for i := 0; i < 20; i++ {
 		flow_id, err := launcher.ScheduleArtifactCollection(
 			ctx, self.ConfigObj,
-			vql_subsystem.NullACLManager{},
+			acl_managers.NullACLManager{},
 			repository, request1, nil)
 		assert.NoError(self.T(), err)
 
@@ -116,7 +117,7 @@ func (self *TestSuite) TestGetFlow() {
 
 		flow_id, err = launcher.ScheduleArtifactCollection(
 			ctx, self.ConfigObj,
-			vql_subsystem.NullACLManager{},
+			acl_managers.NullACLManager{},
 			repository, request2, nil)
 		assert.NoError(self.T(), err)
 
@@ -125,33 +126,16 @@ func (self *TestSuite) TestGetFlow() {
 
 	// Get all the responses - ask for 100 results if available
 	// but only 40 are there.
-	api_response, err := GetFlows(self.ConfigObj,
-		self.client_id, true,
-		func(flow *flows_proto.ArtifactCollectorContext) bool {
-			return true
-		}, 0, 100)
+	api_response, err := launcher.GetFlows(self.Ctx, self.ConfigObj,
+		self.client_id, result_sets.ResultSetOptions{}, 0, 100)
 	assert.NoError(self.T(), err)
 
 	// There should be 40 flows (2 sets of each)
 	assert.Equal(self.T(), 40, len(api_response.Items))
-
-	// Now only get Generic.Client.Info flows by applying a filter.
-	api_response, err = GetFlows(self.ConfigObj,
-		self.client_id, true,
-		func(flow *flows_proto.ArtifactCollectorContext) bool {
-			return flow.Request.Artifacts[0] == "Generic.Client.Info"
-		}, 0, 100)
-	assert.NoError(self.T(), err)
-
-	// There should be 20 flows of type Generic.Client.Info
-	assert.Equal(self.T(), 20, len(api_response.Items))
-	for _, item := range api_response.Items {
-		assert.Equal(self.T(), "Generic.Client.Info", item.Request.Artifacts[0])
-	}
 }
 
 func (self *TestSuite) TestRetransmission() {
-	manager, err := services.GetRepositoryManager()
+	manager, err := services.GetRepositoryManager(self.ConfigObj)
 	assert.NoError(self.T(), err)
 
 	repository, err := manager.GetGlobalRepository(
@@ -164,13 +148,13 @@ func (self *TestSuite) TestRetransmission() {
 	}
 
 	// Schedule a new flow.
-	ctx := context.Background()
-	launcher, err := services.GetLauncher()
+	ctx := self.Ctx
+	launcher, err := services.GetLauncher(self.ConfigObj)
 	assert.NoError(self.T(), err)
 
 	flow_id, err := launcher.ScheduleArtifactCollection(
 		ctx, self.ConfigObj,
-		vql_subsystem.NullACLManager{},
+		acl_managers.NullACLManager{},
 		repository, request, nil)
 	assert.NoError(self.T(), err)
 
@@ -189,19 +173,19 @@ func (self *TestSuite) TestRetransmission() {
 		},
 	}
 
-	runner := NewFlowRunner(self.ConfigObj)
+	runner := NewLegacyFlowRunner(self.ConfigObj)
 	runner.ProcessSingleMessage(ctx, message)
-	runner.Close()
+	runner.Close(self.Ctx)
 
 	// Retransmit the same row again - this can happen if the
 	// server is loaded and the client is re-uploading the same
 	// payload multiple times.
-	runner = NewFlowRunner(self.ConfigObj)
+	runner = NewLegacyFlowRunner(self.ConfigObj)
 	runner.ProcessSingleMessage(ctx, message)
-	runner.Close()
+	runner.Close(self.Ctx)
 
 	// Load the collection context and see what happened.
-	collection_context, err := LoadCollectionContext(self.ConfigObj,
+	collection_context, err := LoadCollectionContext(self.Ctx, self.ConfigObj,
 		self.client_id, flow_id)
 	assert.NoError(self.T(), err)
 
@@ -211,10 +195,9 @@ func (self *TestSuite) TestRetransmission() {
 }
 
 func (self *TestSuite) TestResourceLimits() {
-	manager, err := services.GetRepositoryManager()
+	manager, err := services.GetRepositoryManager(self.ConfigObj)
 	assert.NoError(self.T(), err)
-	repository, err := manager.GetGlobalRepository(
-		self.ConfigObj)
+	repository, err := manager.GetGlobalRepository(self.ConfigObj)
 	assert.NoError(self.T(), err)
 
 	request := &flows_proto.ArtifactCollectorArgs{
@@ -226,27 +209,41 @@ func (self *TestSuite) TestResourceLimits() {
 	}
 
 	// Schedule a new flow.
-	ctx := context.Background()
-	launcher, err := services.GetLauncher()
+	ctx := self.Ctx
+	launcher, err := services.GetLauncher(self.ConfigObj)
 	assert.NoError(self.T(), err)
 
 	flow_id, err := launcher.ScheduleArtifactCollection(
 		ctx,
 		self.ConfigObj,
-		vql_subsystem.NullACLManager{},
+		acl_managers.NullACLManager{},
 		repository, request, nil)
 	assert.NoError(self.T(), err)
 
 	// Drain messages to the client.
-	client_info_manager, err := services.GetClientInfoManager()
+	client_info_manager, err := services.GetClientInfoManager(self.ConfigObj)
 	assert.NoError(self.T(), err)
 
-	messages, err := client_info_manager.GetClientTasks(self.client_id)
-	assert.NoError(self.T(), err)
+	var messages []*crypto_proto.VeloMessage
 
-	// Two requests since there are two source preconditions on
-	// Generic.Client.Info
+	vtesting.WaitUntil(time.Second, self.T(), func() bool {
+		messages, err = client_info_manager.GetClientTasks(
+			self.Ctx, self.client_id)
+		assert.NoError(self.T(), err)
+		return len(messages) == 2
+	})
+
+	// The Generic.Client.Info has two source conditions so it
+	// contains two queries. To maintain backwards compatibility with
+	// older clients, GetClientTasks should have two old style
+	// VQLClientAction request with the first request incorporating
+	// the FlowRequest message. Old clients will ignore the old
+	// requests and new clients will ignore the old style requests.
 	assert.Equal(self.T(), len(messages), 2)
+	assert.True(self.T(), messages[0].VQLClientAction != nil)
+	assert.True(self.T(), messages[1].FlowRequest != nil)
+	assert.True(self.T(), messages[1].VQLClientAction != nil)
+	assert.Equal(self.T(), len(messages[1].FlowRequest.VQLClientActions), 2)
 
 	// Send one row.
 	message := &crypto_proto.VeloMessage{
@@ -263,12 +260,12 @@ func (self *TestSuite) TestResourceLimits() {
 		},
 	}
 
-	runner := NewFlowRunner(self.ConfigObj)
+	runner := NewLegacyFlowRunner(self.ConfigObj)
 	runner.ProcessSingleMessage(ctx, message)
-	runner.Close()
+	runner.Close(self.Ctx)
 
 	// Load the collection context and see what happened.
-	collection_context, err := LoadCollectionContext(self.ConfigObj,
+	collection_context, err := LoadCollectionContext(self.Ctx, self.ConfigObj,
 		self.client_id, flow_id)
 	assert.NoError(self.T(), err)
 
@@ -279,12 +276,12 @@ func (self *TestSuite) TestResourceLimits() {
 
 	// Send another row
 	message.ResponseId++
-	runner = NewFlowRunner(self.ConfigObj)
+	runner = NewLegacyFlowRunner(self.ConfigObj)
 	runner.ProcessSingleMessage(ctx, message)
-	runner.Close()
+	runner.Close(self.Ctx)
 
 	// Load the collection context and see what happened.
-	collection_context, err = LoadCollectionContext(self.ConfigObj,
+	collection_context, err = LoadCollectionContext(self.Ctx, self.ConfigObj,
 		self.client_id, flow_id)
 	assert.NoError(self.T(), err)
 
@@ -297,12 +294,12 @@ func (self *TestSuite) TestResourceLimits() {
 	// but terminate the flow due to resource exhaustion.
 	message.VQLResponse.TotalRows = 5
 	message.ResponseId++
-	runner = NewFlowRunner(self.ConfigObj)
+	runner = NewLegacyFlowRunner(self.ConfigObj)
 	runner.ProcessSingleMessage(ctx, message)
-	runner.Close()
+	runner.Close(self.Ctx)
 
 	// Load the collection context and see what happened.
-	collection_context, err = LoadCollectionContext(self.ConfigObj,
+	collection_context, err = LoadCollectionContext(self.Ctx, self.ConfigObj,
 		self.client_id, flow_id)
 	assert.NoError(self.T(), err)
 
@@ -314,8 +311,13 @@ func (self *TestSuite) TestResourceLimits() {
 	assert.Contains(self.T(), collection_context.Status, "Row count exceeded")
 
 	// Make sure a cancel message was sent to the client.
-	messages, err = client_info_manager.PeekClientTasks(self.client_id)
-	assert.NoError(self.T(), err)
+	vtesting.WaitUntil(time.Second, self.T(), func() bool {
+		messages, err = client_info_manager.PeekClientTasks(
+			self.Ctx, self.client_id)
+		assert.NoError(self.T(), err)
+		return len(messages) == 1
+	})
+
 	assert.Equal(self.T(), len(messages), 1)
 	assert.NotNil(self.T(), messages[0].Cancel)
 
@@ -323,14 +325,14 @@ func (self *TestSuite) TestResourceLimits() {
 	// usually because the client has not received the cancel yet
 	// and is already sending the next message in the queue.
 	message.ResponseId++
-	runner = NewFlowRunner(self.ConfigObj)
+	runner = NewLegacyFlowRunner(self.ConfigObj)
 	runner.ProcessSingleMessage(ctx, message)
-	runner.Close()
+	runner.Close(self.Ctx)
 
 	// We still collect these rows but the flow is still in the
 	// error state. We do this so we dont lose the last few
 	// messages which are still in flight.
-	collection_context, err = LoadCollectionContext(self.ConfigObj,
+	collection_context, err = LoadCollectionContext(self.Ctx, self.ConfigObj,
 		self.client_id, flow_id)
 	assert.NoError(self.T(), err)
 
@@ -340,7 +342,8 @@ func (self *TestSuite) TestResourceLimits() {
 }
 
 func (self *TestSuite) TestClientUploaderStoreFile() {
-	resp := responder.TestResponder()
+	resp := responder.TestResponderWithFlowId(
+		self.ConfigObj, "TestClientUploaderStoreFile")
 	uploader := &uploads.VelociraptorUploader{
 		Responder: resp,
 	}
@@ -356,13 +359,13 @@ func (self *TestSuite) TestClientUploaderStoreFile() {
 	}
 
 	scope := vql_subsystem.MakeScope().AppendVars(ordereddict.NewDict().
-		Set(vql_subsystem.ACL_MANAGER_VAR, vql_subsystem.NullACLManager{}))
-	uploader.Upload(context.Background(), scope,
-		filename, "ntfs", "", 1000,
+		Set(vql_subsystem.ACL_MANAGER_VAR, acl_managers.NullACLManager{}))
+	uploader.Upload(self.Ctx, scope,
+		filename, "ntfs", nil, 1000,
 		nilTime, nilTime, nilTime, nilTime, reader)
 
 	// Get a new collection context.
-	collection_context := NewCollectionContext(self.ConfigObj)
+	collection_context := NewCollectionContext(self.Ctx, self.ConfigObj)
 	collection_context.ArtifactCollectorContext = flows_proto.ArtifactCollectorContext{
 		SessionId:           self.flow_id,
 		ClientId:            self.client_id,
@@ -372,16 +375,16 @@ func (self *TestSuite) TestClientUploaderStoreFile() {
 		},
 	}
 
-	for _, resp := range responder.GetTestResponses(resp) {
-		resp.Source = self.client_id
-		err := ArtifactCollectorProcessOneMessage(
-			self.ConfigObj, collection_context, resp)
+	for _, response := range resp.Drain.WaitForStatsMessage(self.T()) {
+		response.Source = self.client_id
+		err := ArtifactCollectorProcessOneMessage(self.Ctx,
+			self.ConfigObj, collection_context, response)
 		assert.NoError(self.T(), err)
 	}
 
 	// Close the context should force uploaded files to be
 	// flushed.
-	closeContext(self.ConfigObj, collection_context)
+	closeContext(self.Ctx, self.ConfigObj, collection_context)
 
 	assert.Equal(self.T(), collection_context.TotalUploadedFiles, uint64(1))
 
@@ -396,7 +399,8 @@ func (self *TestSuite) TestClientUploaderStoreFile() {
 	flow_path_manager := paths.NewFlowPathManager(self.client_id, self.flow_id)
 	assert.Equal(self.T(),
 		test_utils.FileReadAll(self.T(), self.ConfigObj,
-			flow_path_manager.GetUploadsFile("ntfs", "foo").Path()),
+			flow_path_manager.GetUploadsFile(
+				"ntfs", "foo", []string{"foo"}).Path()),
 		"Hello world ")
 
 	// Check the upload metadata file.
@@ -405,10 +409,15 @@ func (self *TestSuite) TestClientUploaderStoreFile() {
 
 	assert.Equal(self.T(), len(upload_metadata_rows), 1)
 
+	// The vfs_path indicates only the client's path
 	vfs_path, _ := upload_metadata_rows[0].GetString("vfs_path")
-	assert.Equal(self.T(), vfs_path,
-		flow_path_manager.GetUploadsFile("ntfs", "foo").
-			Path().AsClientPath())
+	assert.Equal(self.T(), vfs_path, "foo")
+
+	// The _Components field is the path to the filestore components
+	vfs_components := utils.DictGetStringSlice(upload_metadata_rows[0], "_Components")
+	assert.Equal(self.T(), vfs_components,
+		flow_path_manager.GetUploadsFile("ntfs", "foo", []string{"foo"}).
+			Path().Components())
 
 	file_size, _ := upload_metadata_rows[0].GetInt64("file_size")
 	assert.Equal(self.T(), file_size, int64(12))
@@ -418,7 +427,7 @@ func (self *TestSuite) TestClientUploaderStoreFile() {
 
 	// Check the System.Upload.Completion event.
 	artifact_path_manager, err := artifacts.NewArtifactPathManager(
-		self.ConfigObj, self.client_id, self.flow_id,
+		self.Ctx, self.ConfigObj, self.client_id, self.flow_id,
 		"System.Upload.Completion")
 	assert.NoError(self.T(), err)
 
@@ -429,7 +438,7 @@ func (self *TestSuite) TestClientUploaderStoreFile() {
 
 	vfs_path, _ = event_rows[0].GetString("VFSPath")
 	assert.Equal(self.T(), vfs_path,
-		flow_path_manager.GetUploadsFile("ntfs", "foo").
+		flow_path_manager.GetUploadsFile("ntfs", "foo", []string{"foo"}).
 			Path().AsClientPath())
 
 	file_size, _ = event_rows[0].GetInt64("Size")
@@ -440,21 +449,27 @@ func (self *TestSuite) TestClientUploaderStoreFile() {
 }
 
 // Just a normal collection with error log - receive some rows and an
-// ok status but an error log. An error does not stop the server from
-// receiving more rows - all an error does is mark the collection as
-// errored.
+// ok status but an error log. NOTE: Earlier versions would maintain
+// flow state on the server, but in recent versions flow state is
+// maintained on the client. This means the client flow runner just
+// writes exactly what FlowStats is sending.
 func (self *TestSuite) TestCollectionCompletionErrorLogWithOkStatus() {
+
+	// Emulate messages being sent from the client. Clients maintain
+	// flow state so nothing happens until FlowStats is sent.
 	flow := self.testCollectionCompletion(1, []*crypto_proto.VeloMessage{
 		{
 			SessionId: self.flow_id,
-			RequestId: 1,
+			Source:    self.client_id,
 			LogMessage: &crypto_proto.LogMessage{
-				Message: "Error: This is an error",
+				NumberOfRows: 1,
+				Jsonl:        `{"client_time":1,"level":"ERROR","message":"Error: This is an error"}\n`,
+				ErrorMessage: "Error: This is an error",
 			},
 		},
 		{
 			SessionId: self.flow_id,
-			RequestId: 1,
+			Source:    self.client_id,
 			VQLResponse: &actions_proto.VQLResponse{
 				JSONLResponse: "{}",
 				TotalRows:     1,
@@ -465,16 +480,28 @@ func (self *TestSuite) TestCollectionCompletionErrorLogWithOkStatus() {
 		},
 		{
 			SessionId: self.flow_id,
-			RequestId: 1,
-			Status: &crypto_proto.GrrStatus{
-				Status:   crypto_proto.GrrStatus_OK,
-				Duration: 100,
+			Source:    self.client_id,
+			FlowStats: &crypto_proto.FlowStats{
+				// The final FlowStats is marked as final - the server
+				// can use this to forward the event to any listeners.
+				FlowComplete: true,
+
+				// Stats are tracked per query.
+				QueryStatus: []*crypto_proto.VeloStatus{{
+					Status:       crypto_proto.VeloStatus_GENERIC_ERROR,
+					ErrorMessage: "Error: This is an error",
+					Duration:     100,
+					ResultRows:   1,
+					NamesWithResponse: []string{
+						"Generic.Client.Info/BasicInformation",
+					},
+				}},
 			},
 		},
 	})
 
 	assert.Equal(self.T(), flows_proto.ArtifactCollectorContext_ERROR, flow.State)
-	assert.Contains(self.T(), flow.Status, "Error:")
+	assert.Contains(self.T(), flow.Status, "Error")
 	assert.Equal(self.T(), uint64(1), flow.TotalCollectedRows)
 	assert.Equal(self.T(), []string{"Generic.Client.Info/BasicInformation"},
 		flow.ArtifactsWithResults)
@@ -484,11 +511,11 @@ func (self *TestSuite) TestCollectionCompletionErrorLogWithOkStatus() {
 }
 
 // Just a normal collection - receive some rows and an ok status
-func (self *TestSuite) TestCollectionCompletionOkStatus() {
+func (self *TestSuite) TestCollectionCompletionMultiQueryOkStatus() {
 	flow := self.testCollectionCompletion(1, []*crypto_proto.VeloMessage{
 		{
 			SessionId: self.flow_id,
-			RequestId: 1,
+			Source:    self.client_id,
 			VQLResponse: &actions_proto.VQLResponse{
 				JSONLResponse: "{}",
 				TotalRows:     1,
@@ -499,10 +526,26 @@ func (self *TestSuite) TestCollectionCompletionOkStatus() {
 		},
 		{
 			SessionId: self.flow_id,
-			RequestId: 1,
-			Status: &crypto_proto.GrrStatus{
-				Status:   crypto_proto.GrrStatus_OK,
-				Duration: 100,
+			Source:    self.client_id,
+			FlowStats: &crypto_proto.FlowStats{
+				FlowComplete: true,
+				// Two sources
+				QueryStatus: []*crypto_proto.VeloStatus{
+					{
+						Status:     crypto_proto.VeloStatus_OK,
+						Duration:   100,
+						ResultRows: 1,
+						NamesWithResponse: []string{
+							"Generic.Client.Info/BasicInformation",
+						},
+					}, {
+						Status:     crypto_proto.VeloStatus_OK,
+						Duration:   125,
+						ResultRows: 5,
+						NamesWithResponse: []string{
+							"Generic.Client.Info/Users",
+						},
+					}},
 			},
 		},
 	})
@@ -510,121 +553,24 @@ func (self *TestSuite) TestCollectionCompletionOkStatus() {
 	assert.Equal(self.T(), flows_proto.ArtifactCollectorContext_FINISHED,
 		flow.State)
 
-	// Records the correct execution duration.
-	assert.Equal(self.T(), int64(100), flow.ExecutionDuration)
-	assert.Equal(self.T(), uint64(1), flow.TotalCollectedRows)
-	assert.Equal(self.T(), []string{"Generic.Client.Info/BasicInformation"},
-		flow.ArtifactsWithResults)
-}
-
-// Emulate an artifact with 2 sources - both responses come one after
-// the other but second query failed - this means the entire
-// collection is failed but we get all the results.
-func (self *TestSuite) TestCollectionCompletionSuccessFollowedByErrLog() {
-	flow := self.testCollectionCompletion(2,
-		[]*crypto_proto.VeloMessage{
-			{
-				SessionId: self.flow_id,
-				RequestId: 1,
-				VQLResponse: &actions_proto.VQLResponse{
-					JSONLResponse: "{}",
-					TotalRows:     1,
-					Query: &actions_proto.VQLRequest{
-						Name: "Generic.Client.Info/BasicInformation",
-					},
-				},
-			},
-			{
-				SessionId: self.flow_id,
-				RequestId: 1,
-				Status: &crypto_proto.GrrStatus{
-					Status:   crypto_proto.GrrStatus_OK,
-					Duration: 100,
-				},
-			},
-			{
-				SessionId: self.flow_id,
-				RequestId: 1,
-				VQLResponse: &actions_proto.VQLResponse{
-					JSONLResponse: "{}",
-					TotalRows:     1,
-					Query: &actions_proto.VQLRequest{
-						Name: "Generic.Client.Info/Users",
-					},
-				},
-			},
-			{
-				SessionId: self.flow_id,
-				RequestId: 1,
-				LogMessage: &crypto_proto.LogMessage{
-					Message: "Error: This is an error",
-				},
-			},
-			{
-				SessionId: self.flow_id,
-				RequestId: 1,
-				Status: &crypto_proto.GrrStatus{
-					Status:   crypto_proto.GrrStatus_OK,
-					Duration: 200,
-				},
-			},
-		})
-
-	assert.Equal(self.T(), flows_proto.ArtifactCollectorContext_ERROR, flow.State)
-	assert.Contains(self.T(), flow.Status, "Error:")
-	assert.Equal(self.T(), uint64(2), flow.TotalCollectedRows)
+	// The duration represents the longest duration of all queries.
+	assert.Equal(self.T(), int64(125), flow.ExecutionDuration)
+	assert.Equal(self.T(), uint64(6), flow.TotalCollectedRows)
 	assert.Equal(self.T(), []string{
 		"Generic.Client.Info/BasicInformation",
 		"Generic.Client.Info/Users",
 	}, flow.ArtifactsWithResults)
-
-	// Records the correct execution duration.
-	assert.Equal(self.T(), int64(300), flow.ExecutionDuration)
 }
 
-// Emulate an artifact with 2 sources - a single response arrives with
-// error - error flow is sent immediately before second response
-// arrives.
-func (self *TestSuite) TestCollectionCompletionTwoSourcesIncomplete() {
-	flow := self.testCollectionCompletion(2,
-		[]*crypto_proto.VeloMessage{
-			{
-				SessionId: self.flow_id,
-				RequestId: 1,
-				VQLResponse: &actions_proto.VQLResponse{
-					JSONLResponse: "{}",
-					TotalRows:     1,
-					Query: &actions_proto.VQLRequest{
-						Name: "Generic.Client.Info/BasicInformation",
-					},
-				},
-			},
-			{
-				SessionId: self.flow_id,
-				RequestId: 1,
-				Status: &crypto_proto.GrrStatus{
-					Status:   crypto_proto.GrrStatus_GENERIC_ERROR,
-					Duration: 100,
-				},
-			},
-		})
-
-	// Collection is still running
-	assert.Equal(self.T(), flows_proto.ArtifactCollectorContext_ERROR, flow.State)
-	assert.Equal(self.T(), uint64(1), flow.TotalCollectedRows)
-	assert.Equal(self.T(), []string{
-		"Generic.Client.Info/BasicInformation",
-	}, flow.ArtifactsWithResults)
-
-	// Records the correct execution duration.
-	assert.Equal(self.T(), int64(100), flow.ExecutionDuration)
-}
-
+// Helper for replaying client messages through the client flow
+// runner. This function blocks until the runner sends a
+// System.Flow.Completion message then captures and returns the flow
+// object sent on that event queue.
 func (self *TestSuite) testCollectionCompletion(
 	outstanding_requests int64,
 	requests []*crypto_proto.VeloMessage) *flows_proto.ArtifactCollectorContext {
 	// Get a new collection context.
-	collection_context := NewCollectionContext(self.ConfigObj)
+	collection_context := NewCollectionContext(self.Ctx, self.ConfigObj)
 	collection_context.ArtifactCollectorContext = flows_proto.ArtifactCollectorContext{
 		SessionId:           self.flow_id,
 		ClientId:            self.client_id,
@@ -635,13 +581,13 @@ func (self *TestSuite) testCollectionCompletion(
 		},
 	}
 
-	runner := NewFlowRunner(self.ConfigObj)
-	runner.context_map[self.flow_id] = collection_context
+	runner := NewFlowRunner(self.Ctx, self.ConfigObj)
 
 	wg := &sync.WaitGroup{}
 	mu := &sync.Mutex{}
 	rows := []*ordereddict.Dict{}
 
+	// Capture output from System.Flow.Completion
 	err := journal.WatchQueueWithCB(self.Ctx, self.ConfigObj, wg,
 		"System.Flow.Completion", "", func(ctx context.Context,
 			config_obj *config_proto.Config,
@@ -654,14 +600,10 @@ func (self *TestSuite) testCollectionCompletion(
 		})
 	assert.NoError(self.T(), err)
 
-	// Emulate sending an error log followed by a success status. This
-	// should still be detected as an error and the flow should be
-	// marked as errored.
-	for _, resp := range requests {
-		runner.ProcessSingleMessage(self.Ctx, resp)
+	for _, request := range requests {
+		runner.ProcessSingleMessage(self.Ctx, request)
 	}
-
-	runner.Close()
+	runner.Close(self.Ctx)
 
 	vtesting.WaitUntil(time.Second, self.T(), func() bool {
 		mu.Lock()
@@ -670,6 +612,8 @@ func (self *TestSuite) testCollectionCompletion(
 		return len(rows) > 0
 	})
 
+	// Get the collection_context from the System.Flow.Completion
+	// message.
 	flow_any, pres := rows[0].Get("Flow")
 	assert.True(self.T(), pres)
 
@@ -680,7 +624,8 @@ func (self *TestSuite) testCollectionCompletion(
 }
 
 func (self *TestSuite) TestClientUploaderStoreSparseFile() {
-	resp := responder.TestResponder()
+	resp := responder.TestResponderWithFlowId(
+		self.ConfigObj, "TestClientUploaderStoreSparseFile")
 	uploader := &uploads.VelociraptorUploader{
 		Responder: resp,
 	}
@@ -700,13 +645,13 @@ func (self *TestSuite) TestClientUploaderStoreSparseFile() {
 	}
 
 	scope := vql_subsystem.MakeScope().AppendVars(ordereddict.NewDict().
-		Set(vql_subsystem.ACL_MANAGER_VAR, vql_subsystem.NullACLManager{}))
-	uploader.Upload(context.Background(), scope,
-		sparse_filename, "ntfs", "", 1000,
+		Set(vql_subsystem.ACL_MANAGER_VAR, acl_managers.NullACLManager{}))
+	uploader.Upload(self.Ctx, scope,
+		sparse_filename, "ntfs", nil, 1000,
 		nilTime, nilTime, nilTime, nilTime, reader)
 
 	// Get a new collection context.
-	collection_context := NewCollectionContext(self.ConfigObj)
+	collection_context := NewCollectionContext(self.Ctx, self.ConfigObj)
 	collection_context.ArtifactCollectorContext = flows_proto.ArtifactCollectorContext{
 		SessionId:           self.flow_id,
 		ClientId:            self.client_id,
@@ -714,20 +659,21 @@ func (self *TestSuite) TestClientUploaderStoreSparseFile() {
 		Request:             &flows_proto.ArtifactCollectorArgs{},
 	}
 
-	for _, resp := range responder.GetTestResponses(resp) {
-		resp.Source = self.client_id
+	for _, msg := range resp.Drain.WaitForStatsMessage(self.T()) {
+		msg.Source = self.client_id
+		if msg.FileBuffer != nil {
+			// The uploader should be telling us the overall stats.
+			assert.Equal(self.T(), msg.FileBuffer.Size, uint64(18))
+			assert.Equal(self.T(), msg.FileBuffer.StoredSize, uint64(12))
+		}
 
-		// The uploader should be telling us the overall stats.
-		assert.Equal(self.T(), resp.FileBuffer.Size, uint64(18))
-		assert.Equal(self.T(), resp.FileBuffer.StoredSize, uint64(12))
-
-		ArtifactCollectorProcessOneMessage(self.ConfigObj,
-			collection_context, resp)
+		ArtifactCollectorProcessOneMessage(self.Ctx, self.ConfigObj,
+			collection_context, msg)
 	}
 
 	// Close the context should force uploaded files to be
 	// flushed.
-	closeContext(self.ConfigObj, collection_context)
+	closeContext(self.Ctx, self.ConfigObj, collection_context)
 
 	// One file is uploaded
 	assert.Equal(self.T(), collection_context.TotalUploadedFiles, uint64(1))
@@ -743,7 +689,8 @@ func (self *TestSuite) TestClientUploaderStoreSparseFile() {
 	flow_path_manager := paths.NewFlowPathManager(self.client_id, self.flow_id)
 	assert.Equal(self.T(),
 		test_utils.FileReadAll(self.T(), self.ConfigObj,
-			flow_path_manager.GetUploadsFile("ntfs", "sparse").Path()),
+			flow_path_manager.GetUploadsFile(
+				"ntfs", "sparse", []string{"sparse"}).Path()),
 		"Hello hello ")
 
 	// Check the upload metadata file.
@@ -754,9 +701,12 @@ func (self *TestSuite) TestClientUploaderStoreSparseFile() {
 	assert.Equal(self.T(), len(upload_metadata_rows), 2)
 
 	vfs_path, _ := upload_metadata_rows[0].GetString("vfs_path")
-	assert.Equal(self.T(), vfs_path,
-		flow_path_manager.GetUploadsFile("ntfs", "sparse").
-			Path().AsClientPath())
+	assert.Equal(self.T(), vfs_path, "sparse")
+
+	vfs_components := utils.DictGetStringSlice(upload_metadata_rows[0], "_Components")
+	assert.Equal(self.T(), vfs_components,
+		flow_path_manager.GetUploadsFile(
+			"ntfs", "sparse", []string{"sparse"}).Path().Components())
 
 	// The file is actually 18 bytes on the client.
 	file_size, _ := upload_metadata_rows[0].GetInt64("file_size")
@@ -768,13 +718,16 @@ func (self *TestSuite) TestClientUploaderStoreSparseFile() {
 
 	// Second row is for the index.
 	vfs_path, _ = upload_metadata_rows[1].GetString("vfs_path")
-	assert.Equal(self.T(), vfs_path,
-		flow_path_manager.GetUploadsFile("ntfs", "sparse").
-			IndexPath().AsClientPath())
+	assert.Equal(self.T(), vfs_path, "sparse.idx")
+
+	vfs_components = utils.DictGetStringSlice(upload_metadata_rows[0], "_Components")
+	assert.Equal(self.T(), vfs_components,
+		flow_path_manager.GetUploadsFile(
+			"ntfs", "sparse", []string{"sparse"}).IndexPath().Components())
 
 	// Check the System.Upload.Completion event.
 	artifact_path_manager, err := artifacts.NewArtifactPathManager(
-		self.ConfigObj, self.client_id, self.flow_id,
+		self.Ctx, self.ConfigObj, self.client_id, self.flow_id,
 		"System.Upload.Completion")
 	assert.NoError(self.T(), err)
 
@@ -785,8 +738,8 @@ func (self *TestSuite) TestClientUploaderStoreSparseFile() {
 
 	vfs_path, _ = event_rows[0].GetString("VFSPath")
 	assert.Equal(self.T(), vfs_path,
-		flow_path_manager.GetUploadsFile("ntfs", "sparse").
-			Path().AsClientPath())
+		flow_path_manager.GetUploadsFile(
+			"ntfs", "sparse", []string{"sparse"}).Path().AsClientPath())
 
 	file_size, _ = event_rows[0].GetInt64("Size")
 	assert.Equal(self.T(), file_size, int64(18))
@@ -814,25 +767,26 @@ func (self *TestSuite) TestClientUploaderStoreSparseFileNTFS() {
 	cmd.CombinedOutput()
 
 	scope := vql_subsystem.MakeScope().AppendVars(ordereddict.NewDict().
-		Set(vql_subsystem.ACL_MANAGER_VAR, vql_subsystem.NullACLManager{}))
+		Set(vql_subsystem.ACL_MANAGER_VAR, acl_managers.NullACLManager{}))
 	accessor, err := accessors.GetAccessor("ntfs", scope)
 	assert.NoError(self.T(), err)
 
 	fd, err := accessor.Open(filename)
 	assert.NoError(self.T(), err)
 
-	resp := responder.TestResponder()
+	resp := responder.TestResponderWithFlowId(
+		self.ConfigObj, "TestClientUploaderStoreSparseFileNTFS")
 	uploader := &uploads.VelociraptorUploader{
 		Responder: resp,
 	}
 
 	// Upload the file to the responder.
-	uploader.Upload(context.Background(), scope,
-		sparse_filename, "ntfs", "", 1000,
+	uploader.Upload(self.Ctx, scope,
+		sparse_filename, "ntfs", nil, 1000,
 		nilTime, nilTime, nilTime, nilTime, fd)
 
 	// Get a new collection context.
-	collection_context := NewCollectionContext(self.ConfigObj)
+	collection_context := NewCollectionContext(self.Ctx, self.ConfigObj)
 	collection_context.ArtifactCollectorContext = flows_proto.ArtifactCollectorContext{
 		SessionId: self.flow_id,
 		ClientId:  self.client_id,
@@ -840,15 +794,15 @@ func (self *TestSuite) TestClientUploaderStoreSparseFileNTFS() {
 	}
 
 	// Process it.
-	for _, resp := range responder.GetTestResponses(resp) {
+	for _, resp := range resp.Drain.WaitForStatsMessage(self.T()) {
 		resp.Source = self.client_id
-		ArtifactCollectorProcessOneMessage(self.ConfigObj,
+		ArtifactCollectorProcessOneMessage(self.Ctx, self.ConfigObj,
 			collection_context, resp)
 	}
 
 	// Close the context should force uploaded files to be
 	// flushed.
-	closeContext(self.ConfigObj, collection_context)
+	closeContext(self.Ctx, self.ConfigObj, collection_context)
 
 	// One file is uploaded
 	assert.Equal(self.T(), collection_context.TotalUploadedFiles, uint64(1))
@@ -864,7 +818,8 @@ func (self *TestSuite) TestClientUploaderStoreSparseFileNTFS() {
 	flow_path_manager := paths.NewFlowPathManager(self.client_id, self.flow_id)
 	assert.Equal(self.T(),
 		test_utils.FileReadAll(self.T(), self.ConfigObj,
-			flow_path_manager.GetUploadsFile("ntfs", "sparse").Path()),
+			flow_path_manager.GetUploadsFile(
+				"ntfs", "sparse", []string{"sparse"}).Path()),
 		"")
 
 	// Check the upload metadata file.
@@ -875,9 +830,12 @@ func (self *TestSuite) TestClientUploaderStoreSparseFileNTFS() {
 	assert.Equal(self.T(), len(upload_metadata_rows), 2)
 
 	vfs_path, _ := upload_metadata_rows[0].GetString("vfs_path")
-	assert.Equal(self.T(), vfs_path,
-		flow_path_manager.GetUploadsFile("ntfs", "sparse").
-			Path().AsClientPath())
+	assert.Equal(self.T(), vfs_path, "sparse")
+
+	vfs_components := utils.DictGetStringSlice(upload_metadata_rows[0], "_Components")
+	assert.Equal(self.T(), vfs_components,
+		flow_path_manager.GetUploadsFile(
+			"ntfs", "sparse", []string{"sparse"}).Path().Components())
 
 	// The file is actually 0x100000 bytes on the client.
 	file_size, _ := upload_metadata_rows[0].GetInt64("file_size")
@@ -889,13 +847,16 @@ func (self *TestSuite) TestClientUploaderStoreSparseFileNTFS() {
 
 	// Second row is for the index.
 	vfs_path, _ = upload_metadata_rows[1].GetString("vfs_path")
-	assert.Equal(self.T(), vfs_path,
-		flow_path_manager.GetUploadsFile("ntfs", "sparse").
-			IndexPath().AsClientPath())
+	assert.Equal(self.T(), vfs_path, "sparse.idx")
+
+	vfs_components = utils.DictGetStringSlice(upload_metadata_rows[0], "_Components")
+	assert.Equal(self.T(), vfs_components,
+		flow_path_manager.GetUploadsFile(
+			"ntfs", "sparse", []string{"sparse"}).IndexPath().Components())
 
 	// Check the System.Upload.Completion event.
 	artifact_path_manager, err := artifacts.NewArtifactPathManager(
-		self.ConfigObj, self.client_id, self.flow_id,
+		self.Ctx, self.ConfigObj, self.client_id, self.flow_id,
 		"System.Upload.Completion")
 	assert.NoError(self.T(), err)
 
@@ -906,8 +867,8 @@ func (self *TestSuite) TestClientUploaderStoreSparseFileNTFS() {
 
 	vfs_path, _ = event_rows[0].GetString("VFSPath")
 	assert.Equal(self.T(), vfs_path,
-		flow_path_manager.GetUploadsFile("ntfs", "sparse").
-			Path().AsClientPath())
+		flow_path_manager.GetUploadsFile(
+			"ntfs", "sparse", []string{"sparse"}).Path().AsClientPath())
 
 	file_size, _ = event_rows[0].GetInt64("Size")
 	assert.Equal(self.T(), file_size, int64(0x100000))

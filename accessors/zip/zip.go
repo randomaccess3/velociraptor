@@ -1,6 +1,6 @@
 /*
-   Velociraptor - Hunting Evil
-   Copyright (C) 2019 Velocidex Innovations.
+   Velociraptor - Dig Deeper
+   Copyright (C) 2019-2022 Rapid7 Inc.
 
    This program is free software: you can redistribute it and/or modify
    it under the terms of the GNU Affero General Public License as published
@@ -18,28 +18,12 @@
 
 // A Zip accessor.
 
-// This accessor provides access to compressed archives. The filename
-// is encoded in such a way that this accessor can delegate to another
-// accessor to actually open the underlying zip file. This makes it
-// possible to open zip files read through e.g. raw ntfs.
-
-// For example a filename is URL encoded as:
-// ntfs:/c:\\Windows\\File.zip#/foo/bar
-
-// Refers to the file opened by the accessor "ntfs" (The URL Scheme)
-// with a path (URL Path) of c:\\Windows\File.zip. We then open this
-// file and return a member called /foo/bar (The URL Fragment) within
-// the archive.
-
-// This scheme allows us to nest zip files if we need to:
-// zip://fs:%2Fc:%5Cfoo%5Cbar%23nested.zip#foo/bar
-
-// Refers to the file /foo/bar stored within a zip file nested.zip
-// which is itself stored on the filesystem at c:\foo\bar\nested.zip
+// This accessor provides access to compressed archives.
 
 package zip
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -52,9 +36,12 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 	"www.velocidex.com/golang/velociraptor/accessors"
+	"www.velocidex.com/golang/velociraptor/constants"
 	"www.velocidex.com/golang/velociraptor/json"
 	"www.velocidex.com/golang/velociraptor/third_party/zip"
 	"www.velocidex.com/golang/velociraptor/utils"
+	"www.velocidex.com/golang/vfilter"
+	"www.velocidex.com/golang/vfilter/types"
 )
 
 var (
@@ -259,6 +246,37 @@ type ZipFileCache struct {
 	last_active time.Time
 
 	id uint64
+
+	scope vfilter.Scope
+}
+
+func (self *ZipFileCache) maybeGetPassword() string {
+	password_any, pres := self.scope.Resolve(constants.ZIP_PASSWORDS)
+	if pres {
+		switch t := password_any.(type) {
+		case types.StoredExpression:
+			password_any = t.Reduce(context.TODO(), self.scope)
+
+		case types.LazyExpr:
+			password_any = t.ReduceWithScope(
+				context.TODO(), self.scope)
+		}
+
+		password, ok := password_any.(string)
+		if ok {
+			return password
+		}
+
+	}
+	// If not in scope, check context
+	password_any, ok := self.scope.GetContext(constants.ZIP_PASSWORDS)
+	if ok {
+		password, ok := password_any.(string)
+		if ok {
+			return password
+		}
+	}
+	return ""
 }
 
 // Open a file within the cache. Find a direct reference to the
@@ -278,6 +296,14 @@ func (self *ZipFileCache) Open(full_path *accessors.OSPath) (
 	}
 
 	fd, err := info.member_file.Open()
+	if err == zip.ErrPassword {
+		password := self.maybeGetPassword()
+		if password != "" {
+			info.member_file.SetPassword(password)
+			fd, err = info.member_file.Open()
+		}
+	}
+
 	if err != nil {
 		return nil, fmt.Errorf("While reading %v %s: %w",
 			utils.DebugString(info.member_file),
@@ -331,7 +357,7 @@ loop:
 		}, nil
 	}
 
-	return nil, errors.New("Not found.")
+	return nil, fmt.Errorf("Zip: Not found: %v.", full_path.String())
 }
 
 func (self *ZipFileCache) GetChildren(
@@ -600,9 +626,10 @@ and the Path representing the file within the zip file.
 Example:
 
        select FullPath, Mtime, Size from glob(
-         globs=pathspec(DelegateAccessor='file',
+         globs='/**/*.txt',
+         root=pathspec(DelegateAccessor='file',
               DelegatePath="File.zip",
-              Path='/**/*.txt'),
+              Path='/'),
          accessor='zip')
 
 `)

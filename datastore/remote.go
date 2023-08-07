@@ -18,6 +18,7 @@ import (
 	"www.velocidex.com/golang/velociraptor/file_store/path_specs"
 	"www.velocidex.com/golang/velociraptor/grpc_client"
 	"www.velocidex.com/golang/velociraptor/logging"
+	"www.velocidex.com/golang/velociraptor/utils"
 )
 
 var (
@@ -99,6 +100,7 @@ func (self *RemoteDataStore) _GetSubject(
 	defer closer()
 
 	result, err := conn.GetSubject(ctx, &api_proto.DataRequest{
+		OrgId: config_obj.OrgId,
 		Pathspec: &api_proto.DSPathSpec{
 			Components: urn.Components(),
 			PathType:   int64(urn.Type()),
@@ -146,7 +148,8 @@ func (self *RemoteDataStore) SetSubjectWithCompletion(
 	// Make sure to always call the completion regardless of error
 	// paths.
 	defer func() {
-		if completion != nil {
+		if completion != nil &&
+			!utils.CompareFuncs(completion, utils.SyncCompleter) {
 			completion()
 		}
 	}()
@@ -189,8 +192,9 @@ func (self *RemoteDataStore) _SetSubjectWithCompletion(
 	defer closer()
 
 	_, err = conn.SetSubject(ctx, &api_proto.DataRequest{
-		Data: value,
-		Sync: completion != nil,
+		OrgId: config_obj.OrgId,
+		Data:  value,
+		Sync:  completion != nil,
 		Pathspec: &api_proto.DSPathSpec{
 			Components: urn.Components(),
 			PathType:   int64(urn.Type()),
@@ -222,7 +226,8 @@ func (self *RemoteDataStore) _DeleteSubjectWithCompletion(
 	defer closer()
 
 	_, err = conn.DeleteSubject(ctx, &api_proto.DataRequest{
-		Sync: completion != nil,
+		OrgId: config_obj.OrgId,
+		Sync:  completion != nil,
 		Pathspec: &api_proto.DSPathSpec{
 			Components: urn.Components(),
 			PathType:   int64(urn.Type()),
@@ -258,6 +263,7 @@ func (self *RemoteDataStore) _DeleteSubject(
 	defer closer()
 
 	_, err = conn.DeleteSubject(ctx, &api_proto.DataRequest{
+		OrgId: config_obj.OrgId,
 		Pathspec: &api_proto.DSPathSpec{
 			Components: urn.Components(),
 			PathType:   int64(urn.Type()),
@@ -297,6 +303,7 @@ func (self *RemoteDataStore) _ListChildren(
 	defer closer()
 
 	result, err := conn.ListChildren(ctx, &api_proto.DataRequest{
+		OrgId: config_obj.OrgId,
 		Pathspec: &api_proto.DSPathSpec{
 			Components: urn.Components(),
 			PathType:   int64(urn.Type()),

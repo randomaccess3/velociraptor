@@ -74,13 +74,16 @@ func (self *TestSuite) TearDownTest() {
 }
 
 func (self *TestSuite) TestQueueManager() {
-	repo_manager, err := services.GetRepositoryManager()
+	repo_manager, err := services.GetRepositoryManager(self.ConfigObj)
 	assert.NoError(self.T(), err)
 
 	repository, err := repo_manager.GetGlobalRepository(self.ConfigObj)
 	assert.NoError(self.T(), err)
 
-	_, err = repository.LoadYaml(monitoringArtifact, true, true)
+	_, err = repository.LoadYaml(monitoringArtifact,
+		services.ArtifactOptions{
+			ValidateArtifact:  true,
+			ArtifactIsBuiltIn: true})
 	assert.NoError(self.T(), err)
 
 	file_store := test_utils.GetMemoryFileStore(self.T(), self.ConfigObj)
@@ -94,7 +97,7 @@ func (self *TestSuite) TestQueueManager() {
 		FileBufferLeaseSize: 1,
 	})
 
-	path_manager, err := artifacts.NewArtifactPathManager(self.ConfigObj,
+	path_manager, err := artifacts.NewArtifactPathManager(self.Ctx, self.ConfigObj,
 		"C.123", "", "TestQueue")
 	assert.NoError(self.T(), err)
 
@@ -150,20 +153,24 @@ func (self *TestSuite) TestQueueManager() {
 }
 
 func (self *TestSuite) TestQueueManagerJsonl() {
-	repo_manager, err := services.GetRepositoryManager()
+	repo_manager, err := services.GetRepositoryManager(self.ConfigObj)
 	assert.NoError(self.T(), err)
 
 	repository, err := repo_manager.GetGlobalRepository(self.ConfigObj)
 	assert.NoError(self.T(), err)
 
-	_, err = repository.LoadYaml(monitoringArtifact, true, true)
+	_, err = repository.LoadYaml(monitoringArtifact,
+		services.ArtifactOptions{
+			ValidateArtifact:  true,
+			ArtifactIsBuiltIn: true})
+
 	assert.NoError(self.T(), err)
 
 	file_store := test_utils.GetMemoryFileStore(self.T(), self.ConfigObj)
 	manager := directory.NewDirectoryQueueManager(
 		self.ConfigObj, file_store).(*directory.DirectoryQueueManager)
 
-	path_manager, err := artifacts.NewArtifactPathManager(self.ConfigObj,
+	path_manager, err := artifacts.NewArtifactPathManager(self.Ctx, self.ConfigObj,
 		"C.123", "", "TestQueue")
 	assert.NoError(self.T(), err)
 
@@ -179,7 +186,7 @@ func (self *TestSuite) TestQueueManagerJsonl() {
 		// For performance critical parts it is more efficient to
 		// build the JSONL manually
 		err = manager.PushEventJsonl(path_manager,
-			[]byte(fmt.Sprintf("{\"Foo\":%q}\n", "Bar")))
+			[]byte(fmt.Sprintf("{\"Foo\":%q}\n", "Bar")), 1)
 		assert.NoError(self.T(), err)
 	}
 

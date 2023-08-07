@@ -1,7 +1,6 @@
 package sparse
 
 import (
-	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -9,6 +8,7 @@ import (
 
 	"www.velocidex.com/golang/velociraptor/accessors"
 	"www.velocidex.com/golang/velociraptor/accessors/zip"
+	"www.velocidex.com/golang/velociraptor/json"
 	"www.velocidex.com/golang/velociraptor/uploads"
 	vql_subsystem "www.velocidex.com/golang/velociraptor/vql"
 	vfilter "www.velocidex.com/golang/vfilter"
@@ -232,12 +232,7 @@ func GetSparseFile(full_path *accessors.OSPath, scope vfilter.Scope) (
 
 	// Devices can not be stat'ed
 	size := int64(0)
-	stat, err := accessor.Lstat(pathspec.GetDelegatePath())
-	if err == nil {
-		size = int64(stat.Size())
-	}
-
-	if size == 0 && len(ranges) > 0 {
+	if len(ranges) > 0 {
 		last := ranges[len(ranges)-1]
 		size = last.Offset + last.Length
 	}

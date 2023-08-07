@@ -8,9 +8,11 @@ import (
 	"github.com/sebdah/goldie"
 	"www.velocidex.com/golang/velociraptor/accessors"
 	"www.velocidex.com/golang/velociraptor/accessors/zip"
+	config_proto "www.velocidex.com/golang/velociraptor/config/proto"
 	"www.velocidex.com/golang/velociraptor/constants"
 	"www.velocidex.com/golang/velociraptor/json"
 	vql_subsystem "www.velocidex.com/golang/velociraptor/vql"
+	"www.velocidex.com/golang/velociraptor/vql/acl_managers"
 
 	_ "www.velocidex.com/golang/velociraptor/accessors/ntfs"
 	_ "www.velocidex.com/golang/velociraptor/accessors/offset"
@@ -127,10 +129,11 @@ var human_string_tests = []human_string_tests_t{
 }
 
 func TestOSPathHumanString(t *testing.T) {
+	config_obj := &config_proto.Config{}
 	scope := vql_subsystem.MakeScope().AppendVars(ordereddict.NewDict().
-		Set(vql_subsystem.ACL_MANAGER_VAR, vql_subsystem.NullACLManager{}).
+		Set(vql_subsystem.ACL_MANAGER_VAR, acl_managers.NullACLManager{}).
 		Set(constants.SCOPE_DEVICE_MANAGER,
-			accessors.GlobalDeviceManager.Copy()))
+			accessors.GetDefaultDeviceManager(config_obj).Copy()))
 
 	result := ordereddict.NewDict()
 	for _, test_case := range human_string_tests {

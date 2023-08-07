@@ -26,11 +26,11 @@ package interrogation
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"time"
 
 	"github.com/Velocidex/ordereddict"
-	"github.com/pkg/errors"
 	"golang.org/x/time/rate"
 	actions_proto "www.velocidex.com/golang/velociraptor/actions/proto"
 	config_proto "www.velocidex.com/golang/velociraptor/config/proto"
@@ -42,10 +42,10 @@ import (
 	"www.velocidex.com/golang/velociraptor/paths"
 	"www.velocidex.com/golang/velociraptor/paths/artifacts"
 	"www.velocidex.com/golang/velociraptor/result_sets"
-	"www.velocidex.com/golang/velociraptor/search"
 	"www.velocidex.com/golang/velociraptor/services"
 	"www.velocidex.com/golang/velociraptor/services/journal"
-	vql_subsystem "www.velocidex.com/golang/velociraptor/vql"
+	"www.velocidex.com/golang/velociraptor/utils"
+	"www.velocidex.com/golang/velociraptor/vql/acl_managers"
 )
 
 type EnrollmentService struct {
@@ -58,7 +58,7 @@ func (self *EnrollmentService) Start(
 	wg *sync.WaitGroup) error {
 
 	logger := logging.GetLogger(config_obj, &logging.FrontendComponent)
-	logger.Info("<green>Starting</> Enrollment service.")
+	logger.Info("<green>Starting</> Enrollment service for %v.", services.GetOrgName(config_obj))
 
 	// Also watch for customized interrogation artifacts.
 	err := journal.WatchForCollectionWithCB(ctx, config_obj, wg,
@@ -105,23 +105,24 @@ func (self *EnrollmentService) ProcessEnrollment(
 	}
 
 	// Get the client info from the client info manager.
-	client_info_manager, err := services.GetClientInfoManager()
+	client_info_manager, err := services.GetClientInfoManager(config_obj)
 	if err != nil {
 		return err
 	}
-	_, err = client_info_manager.Get(client_id)
+
+	client_info, err := client_info_manager.Get(ctx, client_id)
 
 	// If we have a valid client record we do not need to
 	// interrogate. Interrogation happens automatically only once
 	// - the first time a client appears.
-	if err == nil {
+	if err == nil && client_info.LastInterrogateFlowId != "" {
 		return nil
 	}
 
 	// Wait for rate token
 	self.limiter.Wait(ctx)
 
-	manager, err := services.GetRepositoryManager()
+	manager, err := services.GetRepositoryManager(config_obj)
 	if err != nil {
 		return err
 	}
@@ -135,19 +136,19 @@ func (self *EnrollmentService) ProcessEnrollment(
 
 	// Allow the user to override the basic interrogation
 	// functionality.  Check for any customized versions
-	definition, pres := repository.Get(config_obj, "Custom.Generic.Client.Info")
+	definition, pres := repository.Get(ctx, config_obj, "Custom.Generic.Client.Info")
 	if pres {
 		interrogation_artifact = definition.Name
 	}
 
 	// Issue the flow on the client.
-	launcher, err := services.GetLauncher()
+	launcher, err := services.GetLauncher(config_obj)
 	if err != nil {
 		return err
 	}
 
 	flow_id, err := launcher.ScheduleArtifactCollection(
-		ctx, config_obj, vql_subsystem.NullACLManager{},
+		ctx, config_obj, acl_managers.NullACLManager{},
 		repository,
 		&flows_proto.ArtifactCollectorArgs{
 			Creator:   "InterrogationService",
@@ -155,9 +156,9 @@ func (self *EnrollmentService) ProcessEnrollment(
 			Artifacts: []string{interrogation_artifact},
 		}, func() {
 			// Notify the client
-			notifier := services.GetNotifier()
-			if notifier != nil {
-				notifier.NotifyListener(
+			notifier, err := services.GetNotifier(config_obj)
+			if err == nil {
+				notifier.NotifyListener(ctx,
 					config_obj, client_id, "Interrogate")
 			}
 		})
@@ -169,21 +170,18 @@ func (self *EnrollmentService) ProcessEnrollment(
 	// flight. We are here because the client_info_manager does not
 	// have the record in cache, so next Get() will just read it from
 	// disk on all minions.
-	db, err := datastore.GetDB(config_obj)
+	err = client_info_manager.Set(ctx, &services.ClientInfo{
+		actions_proto.ClientInfo{
+			ClientId:                    client_id,
+			FirstSeenAt:                 uint64(time.Now().Unix()),
+			LastInterrogateFlowId:       flow_id,
+			LastInterrogateArtifactName: interrogation_artifact,
+		}})
 	if err != nil {
 		return err
 	}
 
-	client_path_manager := paths.NewClientPathManager(client_id)
-	client_info := &actions_proto.ClientInfo{
-		ClientId:                    client_id,
-		FirstSeenAt:                 uint64(time.Now().Unix()),
-		LastInterrogateFlowId:       flow_id,
-		LastInterrogateArtifactName: interrogation_artifact,
-	}
-
-	err = db.SetSubjectWithCompletion(
-		config_obj, client_path_manager.Path(), client_info, nil)
+	indexer, err := services.GetIndexer(config_obj)
 	if err != nil {
 		return err
 	}
@@ -192,7 +190,7 @@ func (self *EnrollmentService) ProcessEnrollment(
 		"all", // This is used for "." search
 		client_id,
 	} {
-		err = search.SetIndex(config_obj, client_id, term)
+		err = indexer.SetIndex(client_id, term)
 		if err != nil {
 			logger := logging.GetLogger(config_obj, &logging.FrontendComponent)
 			logger.Error("Unable to set index: %v", err)
@@ -207,8 +205,10 @@ func (self *EnrollmentService) ProcessInterrogateResults(
 	config_obj *config_proto.Config,
 	client_id, flow_id, artifact string) error {
 
+	utils.Debug(client_id)
+
 	file_store_factory := file_store.GetFileStore(config_obj)
-	path_manager, err := artifacts.NewArtifactPathManager(config_obj,
+	path_manager, err := artifacts.NewArtifactPathManager(ctx, config_obj,
 		client_id, flow_id, artifact)
 	if err != nil {
 		return err
@@ -238,9 +238,18 @@ func (self *EnrollmentService) ProcessInterrogateResults(
 			Architecture:                getter("Architecture"),
 			Fqdn:                        getter("Fqdn"),
 			ClientName:                  getter("Name"),
-			ClientVersion:               getter("BuildTime"),
+			ClientVersion:               getter("Version"),
+			BuildUrl:                    getter("build_url"),
 			LastInterrogateFlowId:       flow_id,
 			LastInterrogateArtifactName: artifact,
+		}
+
+		build_time, pres := row.Get("BuildTime")
+		if pres {
+			t, ok := build_time.(time.Time)
+			if ok {
+				client_info.BuildTime = t.UTC().Format(time.RFC3339)
+			}
 		}
 
 		label_array, ok := row.GetStrings("Labels")
@@ -260,6 +269,11 @@ func (self *EnrollmentService) ProcessInterrogateResults(
 		return errors.New("No Generic.Client.Info results")
 	}
 
+	client_info_manager, err := services.GetClientInfoManager(config_obj)
+	if err != nil {
+		return err
+	}
+
 	client_path_manager := paths.NewClientPathManager(client_id)
 	db, err := datastore.GetDB(config_obj)
 	if err != nil {
@@ -275,47 +289,37 @@ func (self *EnrollmentService) ProcessInterrogateResults(
 	}
 	client_info.FirstSeenAt = public_key_info.EnrollTime
 
-	// Expire the client info manager to force it to fetch fresh data.
-	client_info_manager, err := services.GetClientInfoManager()
+	journal, err := services.GetJournal(config_obj)
 	if err != nil {
 		return err
 	}
 
-	journal, err := services.GetJournal()
-	if err != nil {
-		return err
-	}
+	client_info_manager.Set(ctx, &services.ClientInfo{*client_info})
 
-	err = db.SetSubjectWithCompletion(config_obj,
-		client_path_manager.Path(), client_info,
-
-		// Completion
-		func() {
-			client_info_manager.Flush(client_id)
-
-			journal.PushRowsToArtifactAsync(config_obj,
-				ordereddict.NewDict().
-					Set("ClientId", client_id),
-				"Server.Internal.Interrogation")
-		})
-	if err != nil {
-		return err
-	}
+	journal.PushRowsToArtifactAsync(ctx, config_obj,
+		ordereddict.NewDict().
+			Set("ClientId", client_id),
+		"Server.Internal.Interrogation")
 
 	// Set labels in the labeler.
 	if len(client_info.Labels) > 0 {
-		labeler := services.GetLabeler()
+		labeler := services.GetLabeler(config_obj)
 		for _, label := range client_info.Labels {
-			err := labeler.SetClientLabel(config_obj, client_id, label)
+			err := labeler.SetClientLabel(ctx, config_obj, client_id, label)
 			if err != nil {
 				return err
 			}
 		}
 	}
 
+	indexer, err := services.GetIndexer(config_obj)
+	if err != nil {
+		return err
+	}
+
 	// Add MAC addresses to the index.
 	for _, mac := range client_info.MacAddresses {
-		err := search.SetIndex(config_obj, client_id, "mac:"+mac)
+		err := indexer.SetIndex(client_id, "mac:"+mac)
 		if err != nil {
 			logger := logging.GetLogger(config_obj, &logging.FrontendComponent)
 			logger.Error("Unable to set index: %v", err)
@@ -325,9 +329,11 @@ func (self *EnrollmentService) ProcessInterrogateResults(
 	// Update the client indexes for the GUI. Add any keywords we
 	// wish to be searchable in the UI here.
 	for _, term := range []string{
+		"all",
+		client_id,
 		"host:" + client_info.Fqdn,
 		"host:" + client_info.Hostname} {
-		err := search.SetIndex(config_obj, client_id, term)
+		err := indexer.SetIndex(client_id, term)
 		if err != nil {
 			logger := logging.GetLogger(config_obj, &logging.FrontendComponent)
 			logger.Error("Unable to set index: %v", err)
@@ -337,7 +343,7 @@ func (self *EnrollmentService) ProcessInterrogateResults(
 	return nil
 }
 
-func StartInterrogationService(
+func NewInterrogationService(
 	ctx context.Context,
 	wg *sync.WaitGroup,
 	config_obj *config_proto.Config) error {

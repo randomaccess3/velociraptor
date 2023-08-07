@@ -34,6 +34,7 @@ import (
 	config_proto "www.velocidex.com/golang/velociraptor/config/proto"
 	"www.velocidex.com/golang/velociraptor/file_store/api"
 	"www.velocidex.com/golang/velociraptor/json"
+	"www.velocidex.com/golang/velociraptor/logging"
 	"www.velocidex.com/golang/velociraptor/result_sets"
 	"www.velocidex.com/golang/velociraptor/utils"
 )
@@ -71,6 +72,9 @@ func (self *QueuePool) Register(
 	subctx, cancel := context.WithCancel(ctx)
 	new_registration, err := NewListener(self.config_obj, subctx, vfs_path, options)
 	if err != nil {
+		logger := logging.GetLogger(self.config_obj, &logging.FrontendComponent)
+		logger.Warn("Failed to register QueuePool for %s: %v", vfs_path, err)
+
 		cancel()
 		output_chan := make(chan *ordereddict.Dict)
 		close(output_chan)
@@ -185,6 +189,10 @@ type DirectoryQueueManager struct {
 	Clock      utils.Clock
 }
 
+func (self *DirectoryQueueManager) SetClock(clock utils.Clock) {
+	self.Clock = clock
+}
+
 func (self *DirectoryQueueManager) Debug() *ordereddict.Dict {
 	return self.queue_pool.Debug()
 }
@@ -204,7 +212,8 @@ func (self *DirectoryQueueManager) PushEventRows(
 
 	// Writes are asyncronous.
 	rs_writer, err := result_sets.NewTimedResultSetWriter(
-		self.FileStore, path_manager, nil, nil)
+		self.FileStore, path_manager, json.DefaultEncOpts(),
+		utils.BackgroundWriter)
 	if err != nil {
 		return err
 	}
@@ -220,18 +229,19 @@ func (self *DirectoryQueueManager) PushEventRows(
 }
 
 func (self *DirectoryQueueManager) PushEventJsonl(
-	path_manager api.PathManager, jsonl []byte) error {
+	path_manager api.PathManager, jsonl []byte, row_count int) error {
 
 	// Writes are asyncronous.
 	rs_writer, err := result_sets.NewTimedResultSetWriter(
-		self.FileStore, path_manager, nil, nil)
+		self.FileStore, path_manager, json.DefaultEncOpts(),
+		utils.BackgroundWriter)
 	if err != nil {
 		return err
 	}
 	defer rs_writer.Close()
 
 	jsonl = json.AppendJsonlItem(jsonl, "_ts", int(self.Clock.Now().Unix()))
-	rs_writer.WriteJSONL(jsonl, 0)
+	rs_writer.WriteJSONL(jsonl, row_count)
 	self.queue_pool.BroadcastJsonl(path_manager.GetQueueName(), jsonl)
 
 	return nil

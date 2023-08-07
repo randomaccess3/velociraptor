@@ -18,12 +18,13 @@ import (
 )
 
 var (
-	BUFF_SIZE = int64(1024 * 1024)
+	BUFF_SIZE  = int64(1024 * 1024)
+	UPLOAD_CTX = "__uploads"
 )
 
 // An uploader delivering files from client to server.
 type VelociraptorUploader struct {
-	Responder *responder.Responder
+	Responder responder.Responder
 	Count     int
 }
 
@@ -32,7 +33,7 @@ func (self *VelociraptorUploader) Upload(
 	scope vfilter.Scope,
 	filename *accessors.OSPath,
 	accessor string,
-	store_as_name string,
+	store_as_name *accessors.OSPath,
 	expected_size int64,
 	mtime time.Time,
 	atime time.Time,
@@ -41,21 +42,38 @@ func (self *VelociraptorUploader) Upload(
 	reader io.Reader) (
 	*UploadResponse, error) {
 
+	if accessor == "" {
+		accessor = "auto"
+	}
+
+	if store_as_name == nil {
+		store_as_name = filename
+	}
+
+	cached, pres, closer := DeduplicateUploads(scope, store_as_name)
+	defer closer()
+	if pres {
+		return cached, nil
+	}
+
+	upload_id := self.Responder.NextUploadId()
+
 	// Try to collect sparse files if possible
 	result, err := self.maybeUploadSparse(
 		ctx, scope, filename, accessor, store_as_name,
-		expected_size, mtime, reader)
+		expected_size, mtime, upload_id, reader)
 	if err == nil {
+		CacheUploadResult(scope, store_as_name, result)
 		return result, nil
 	}
 
-	if store_as_name == "" {
-		store_as_name = filename.String()
-	}
-
 	result = &UploadResponse{
-		Path:       filename.String(),
-		StoredName: store_as_name,
+		StoredName: store_as_name.String(),
+		Accessor:   accessor,
+		Components: store_as_name.Components[:],
+	}
+	if accessor != "data" {
+		result.Path = filename.String()
 	}
 
 	offset := uint64(0)
@@ -86,17 +104,23 @@ func (self *VelociraptorUploader) Upload(
 
 		packet := &actions_proto.FileBuffer{
 			Pathspec: &actions_proto.PathSpec{
-				Path:     store_as_name,
-				Accessor: accessor,
+				Path:       store_as_name.String(),
+				Components: store_as_name.Components,
+				Accessor:   accessor,
 			},
 			Offset:     offset,
 			Size:       uint64(expected_size),
-			StoredSize: uint64(expected_size),
+			StoredSize: offset + uint64(len(data)),
 			Mtime:      mtime.UnixNano(),
 			Atime:      atime.UnixNano(),
 			Ctime:      ctime.UnixNano(),
 			Btime:      btime.UnixNano(),
 			Data:       data,
+			DataLength: uint64(len(data)),
+
+			// The number of the upload within the flow.
+			UploadNumber: upload_id,
+			Eof:          read_bytes == 0,
 		}
 
 		select {
@@ -105,7 +129,7 @@ func (self *VelociraptorUploader) Upload(
 
 		default:
 			// Send the packet to the server.
-			self.Responder.AddResponse(ctx, &crypto_proto.VeloMessage{
+			self.Responder.AddResponse(&crypto_proto.VeloMessage{
 				RequestId:  constants.TransferWellKnownFlowId,
 				FileBuffer: packet})
 		}
@@ -115,11 +139,14 @@ func (self *VelociraptorUploader) Upload(
 			return nil, err
 		}
 
+		// On the last packet send back the hashes into the query.
 		if read_bytes == 0 {
 			result.Size = offset
 			result.StoredSize = offset
 			result.Sha256 = hex.EncodeToString(sha_sum.Sum(nil))
 			result.Md5 = hex.EncodeToString(md5_sum.Sum(nil))
+
+			CacheUploadResult(scope, store_as_name, result)
 			return result, nil
 		}
 	}
@@ -130,9 +157,10 @@ func (self *VelociraptorUploader) maybeUploadSparse(
 	scope vfilter.Scope,
 	filename *accessors.OSPath,
 	accessor string,
-	store_as_name string,
+	store_as_name *accessors.OSPath,
 	ignored_expected_size int64,
 	mtime time.Time,
+	upload_id int64,
 	reader io.Reader) (
 	*UploadResponse, error) {
 
@@ -144,14 +172,19 @@ func (self *VelociraptorUploader) maybeUploadSparse(
 
 	index := &actions_proto.Index{}
 
+	if store_as_name == nil {
+		store_as_name = filename
+	}
+
 	// This is the response that will be passed into the VQL
 	// engine.
 	result := &UploadResponse{
-		Path: filename.String(),
+		StoredName: store_as_name.String(),
+		Components: store_as_name.Components,
+		Accessor:   accessor,
 	}
-
-	if store_as_name == "" {
-		store_as_name = filename.String()
+	if accessor != "data" {
+		result.Path = filename.String()
 	}
 
 	self.Count += 1
@@ -207,19 +240,21 @@ func (self *VelociraptorUploader) maybeUploadSparse(
 			index = nil
 		}
 
-		self.Responder.AddResponse(ctx, &crypto_proto.VeloMessage{
+		self.Responder.AddResponse(&crypto_proto.VeloMessage{
 			RequestId: constants.TransferWellKnownFlowId,
 			FileBuffer: &actions_proto.FileBuffer{
 				Pathspec: &actions_proto.PathSpec{
-					Path:     store_as_name,
-					Accessor: accessor,
+					Path:       store_as_name.String(),
+					Components: store_as_name.Components,
+					Accessor:   accessor,
 				},
-				Size:       uint64(real_size),
-				StoredSize: 0,
-				IsSparse:   is_sparse,
-				Index:      index,
-				Mtime:      mtime.UnixNano(),
-				Eof:        true,
+				Size:         uint64(real_size),
+				StoredSize:   uint64(expected_size),
+				IsSparse:     is_sparse,
+				Index:        index,
+				Mtime:        mtime.UnixNano(),
+				Eof:          true,
+				UploadNumber: upload_id,
 			},
 		})
 
@@ -279,15 +314,18 @@ func (self *VelociraptorUploader) maybeUploadSparse(
 
 			packet := &actions_proto.FileBuffer{
 				Pathspec: &actions_proto.PathSpec{
-					Path:     store_as_name,
-					Accessor: accessor,
+					Path:       store_as_name.String(),
+					Components: store_as_name.Components,
+					Accessor:   accessor,
 				},
-				Offset:     uint64(write_offset),
-				Size:       uint64(real_size),
-				StoredSize: uint64(expected_size),
-				IsSparse:   is_sparse,
-				Mtime:      mtime.UnixNano(),
-				Data:       data,
+				Offset:       uint64(write_offset),
+				Size:         uint64(real_size),
+				StoredSize:   uint64(expected_size),
+				IsSparse:     is_sparse,
+				Mtime:        mtime.UnixNano(),
+				Data:         data,
+				DataLength:   uint64(len(data)),
+				UploadNumber: upload_id,
 			}
 
 			select {
@@ -296,7 +334,7 @@ func (self *VelociraptorUploader) maybeUploadSparse(
 
 			default:
 				// Send the packet to the server.
-				self.Responder.AddResponse(ctx, &crypto_proto.VeloMessage{
+				self.Responder.AddResponse(&crypto_proto.VeloMessage{
 					RequestId:  constants.TransferWellKnownFlowId,
 					FileBuffer: packet})
 			}
@@ -315,19 +353,21 @@ func (self *VelociraptorUploader) maybeUploadSparse(
 	// Send an EOF as the last packet with no data. If the file
 	// was sparse, also include the index in this packet. NOTE:
 	// There should be only one EOF packet.
-	self.Responder.AddResponse(ctx, &crypto_proto.VeloMessage{
+	self.Responder.AddResponse(&crypto_proto.VeloMessage{
 		RequestId: constants.TransferWellKnownFlowId,
 		FileBuffer: &actions_proto.FileBuffer{
 			Pathspec: &actions_proto.PathSpec{
-				Path:     store_as_name,
-				Accessor: accessor,
+				Path:       store_as_name.String(),
+				Components: store_as_name.Components,
+				Accessor:   accessor,
 			},
-			Size:       uint64(real_size),
-			StoredSize: uint64(expected_size),
-			IsSparse:   is_sparse,
-			Offset:     uint64(write_offset),
-			Index:      index,
-			Eof:        true,
+			Size:         uint64(real_size),
+			StoredSize:   uint64(write_offset),
+			IsSparse:     is_sparse,
+			Offset:       uint64(write_offset),
+			Index:        index,
+			Eof:          true,
+			UploadNumber: upload_id,
 		},
 	})
 

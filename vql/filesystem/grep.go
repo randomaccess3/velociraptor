@@ -1,8 +1,8 @@
 // +build deprecated
 
 /*
-   Velociraptor - Hunting Evil
-   Copyright (C) 2019 Velocidex Innovations.
+   Velociraptor - Dig Deeper
+   Copyright (C) 2019-2022 Rapid7 Inc.
 
    This program is free software: you can redistribute it and/or modify
    it under the terms of the GNU Affero General Public License as published
@@ -27,6 +27,8 @@ import (
 	"github.com/Velocidex/ahocorasick"
 	"github.com/Velocidex/ordereddict"
 	"www.velocidex.com/golang/velociraptor/accessors"
+	"www.velocidex.com/golang/velociraptor/acls"
+	"www.velocidex.com/golang/velociraptor/vql"
 	vql_subsystem "www.velocidex.com/golang/velociraptor/vql"
 	"www.velocidex.com/golang/vfilter"
 	"www.velocidex.com/golang/vfilter/arg_parser"
@@ -145,9 +147,10 @@ func (self *GrepFunction) Call(ctx context.Context,
 
 func (self GrepFunction) Info(scope vfilter.Scope, type_map *vfilter.TypeMap) *vfilter.FunctionInfo {
 	return &vfilter.FunctionInfo{
-		Name:    "grep",
-		Doc:     "Search a file for keywords.",
-		ArgType: type_map.AddType(scope, &GrepFunctionArgs{}),
+		Name:     "grep",
+		Doc:      "Search a file for keywords.",
+		ArgType:  type_map.AddType(scope, &GrepFunctionArgs{}),
+		Metadata: vql.VQLMetadata().Permissions(acls.FILESYSTEM_READ).Build(),
 	}
 }
 

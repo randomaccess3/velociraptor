@@ -26,9 +26,8 @@
 package services
 
 import (
-	"errors"
+	"context"
 	"log"
-	"sync"
 
 	"github.com/Velocidex/ordereddict"
 	"www.velocidex.com/golang/velociraptor/artifacts"
@@ -39,27 +38,24 @@ import (
 	"www.velocidex.com/golang/vfilter"
 )
 
-var (
-	repository_mu sync.Mutex
-	grepository   RepositoryManager
-)
+type ArtifactOptions struct {
+	// Protects the artifact from being overwritten.
+	ArtifactIsBuiltIn bool
 
-func GetRepositoryManager() (RepositoryManager, error) {
-	repository_mu.Lock()
-	defer repository_mu.Unlock()
+	// Artifact is actually built into the binary
+	ArtifactIsCompiledIn bool
 
-	if grepository == nil {
-		return nil, errors.New("Repository Manager not ready")
-	}
-
-	return grepository, nil
+	// Validate the artifact compiles
+	ValidateArtifact bool
 }
 
-func RegisterRepositoryManager(repository RepositoryManager) {
-	repository_mu.Lock()
-	defer repository_mu.Unlock()
+func GetRepositoryManager(config_obj *config_proto.Config) (RepositoryManager, error) {
+	org_manager, err := GetOrgManager()
+	if err != nil {
+		return nil, err
+	}
 
-	grepository = repository
+	return org_manager.Services(config_obj.OrgId).RepositoryManager()
 }
 
 // Make it easier to build a query scope using the aritfact
@@ -80,36 +76,33 @@ type ScopeBuilder struct {
 
 // An artifact repository holds definitions for artifacts.
 type Repository interface {
-	// Load an entire directory recursively.
-	LoadDirectory(config_obj *config_proto.Config,
-		dirname string, override_builtins bool) (int, error)
-
 	// Make a copy of this repository.
 	Copy() Repository
 
 	// Load definition in yaml
-	LoadYaml(data string, validate, built_in bool) (
+	LoadYaml(data string, options ArtifactOptions) (
 		*artifacts_proto.Artifact, error)
 
 	// Load an artifact protobuf.
-	LoadProto(artifact *artifacts_proto.Artifact, validate bool) (
+	LoadProto(artifact *artifacts_proto.Artifact, options ArtifactOptions) (
 		*artifacts_proto.Artifact, error)
 
 	// Get an artifact by name.
-	Get(config_obj *config_proto.Config,
+	Get(ctx context.Context, config_obj *config_proto.Config,
 		name string) (*artifacts_proto.Artifact, bool)
 
-	GetSource(config_obj *config_proto.Config,
+	GetSource(ctx context.Context, config_obj *config_proto.Config,
 		name string) (*artifacts_proto.ArtifactSource, bool)
 
 	// An optimization that avoids copying the entire artifact definition
-	GetArtifactType(config_obj *config_proto.Config, artifact_name string) (string, error)
+	GetArtifactType(ctx context.Context, config_obj *config_proto.Config,
+		artifact_name string) (string, error)
 
 	// Remove a named artifact from the repository.
 	Del(name string)
 
 	// List
-	List() []string
+	List(ctx context.Context, config_obj *config_proto.Config) ([]string, error)
 }
 
 // Manages the global artifact repository
@@ -130,6 +123,8 @@ type RepositoryManager interface {
 	// Only used for tests.
 	SetGlobalRepositoryForTests(config_obj *config_proto.Config, repository Repository)
 
+	SetParent(config_obj *config_proto.Config, parent Repository)
+
 	// Before callers can run VQL queries they need to create a
 	// query scope. This function uses the builder pattern above
 	// to create a new scope.
@@ -142,16 +137,18 @@ type RepositoryManager interface {
 	BuildScopeFromScratch(builder ScopeBuilder) vfilter.Scope
 
 	// Store the file to the repository. It will be stored in the datastore as well.
-	SetArtifactFile(config_obj *config_proto.Config, principal string,
+	SetArtifactFile(
+		ctx context.Context, config_obj *config_proto.Config, principal string,
 		data, required_prefix string) (*artifacts_proto.Artifact, error)
 
 	// Delete the file from the global repository and the data store.
-	DeleteArtifactFile(config_obj *config_proto.Config,
-		principal, name string) error
+	DeleteArtifactFile(ctx context.Context,
+		config_obj *config_proto.Config, principal, name string) error
 }
 
 type MockablePlugin interface {
-	SetMock(rows []vfilter.Row)
+	SetMock(name string, rows []vfilter.Row)
+	Name() string
 }
 
 // A helper function to build a new scope from an existing scope. This

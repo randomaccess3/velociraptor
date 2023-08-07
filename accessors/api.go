@@ -1,9 +1,11 @@
 package accessors
 
 import (
+	"fmt"
 	"io"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Velocidex/ordereddict"
@@ -39,6 +41,8 @@ type PathManipulator interface {
 }
 
 type OSPath struct {
+	mu sync.Mutex
+
 	Components []string
 
 	// Some paths need more information. They store an additional path
@@ -48,8 +52,38 @@ type OSPath struct {
 	Manipulator PathManipulator
 }
 
+func (self *OSPath) DescribeType() string {
+	subtype := ""
+	switch self.Manipulator.(type) {
+	case LinuxPathManipulator:
+		subtype = "LinuxPath"
+	case GenericPathManipulator:
+		subtype = "Generic"
+	case WindowsPathManipulator:
+		subtype = "WindowsPath"
+	case WindowsNTFSManipulator:
+		subtype = "NTFSPath"
+	case WindowsRegistryPathManipulator:
+		subtype = "RegistryPath"
+	case PathSpecPathManipulator:
+		subtype = "PathSpec"
+	case FileStorePathManipulator:
+		subtype = "FileStorePath"
+	case RawFileManipulator:
+		subtype = "RawPath"
+	case ZipFileManipulator:
+		subtype = "ZipPathspec"
+	default:
+		subtype = fmt.Sprintf("%T", self.Manipulator)
+	}
+	return fmt.Sprintf("OSPath(%s)", subtype)
+}
+
 // Make a copy of the OSPath
-func (self OSPath) Copy() *OSPath {
+func (self *OSPath) Copy() *OSPath {
+	self.mu.Lock()
+	defer self.mu.Unlock()
+
 	pathspec := self.pathspec
 	if pathspec != nil {
 		pathspec = pathspec.Copy()
@@ -62,15 +96,24 @@ func (self OSPath) Copy() *OSPath {
 }
 
 func (self *OSPath) SetPathSpec(pathspec *PathSpec) {
+	self.mu.Lock()
+	defer self.mu.Unlock()
+
 	self.Manipulator.PathParse(pathspec.Path, self)
 	self.pathspec = pathspec
 }
 
 func (self *OSPath) PathSpec() *PathSpec {
+	self.mu.Lock()
+	defer self.mu.Unlock()
+
 	return self.Manipulator.AsPathSpec(self)
 }
 
 func (self *OSPath) DelegatePath() string {
+	self.mu.Lock()
+	defer self.mu.Unlock()
+
 	pathspec := self.Manipulator.AsPathSpec(self)
 	if pathspec.DelegatePath == "" && pathspec.Delegate != nil {
 		pathspec.DelegatePath = json.MustMarshalString(pathspec.Delegate)
@@ -79,14 +122,23 @@ func (self *OSPath) DelegatePath() string {
 }
 
 func (self *OSPath) DelegateAccessor() string {
+	self.mu.Lock()
+	defer self.mu.Unlock()
+
 	return self.Manipulator.AsPathSpec(self).DelegateAccessor
 }
 
 func (self *OSPath) Path() string {
+	self.mu.Lock()
+	defer self.mu.Unlock()
+
 	return self.Manipulator.AsPathSpec(self).Path
 }
 
 func (self *OSPath) String() string {
+	self.mu.Lock()
+	defer self.mu.Unlock()
+
 	// Cache it if we need to.
 	if self.serialized != nil {
 		return *self.serialized
@@ -99,6 +151,9 @@ func (self *OSPath) String() string {
 }
 
 func (self *OSPath) Parse(path string) (*OSPath, error) {
+	self.mu.Lock()
+	defer self.mu.Unlock()
+
 	result := &OSPath{
 		Manipulator: self.Manipulator,
 	}
@@ -108,6 +163,9 @@ func (self *OSPath) Parse(path string) (*OSPath, error) {
 }
 
 func (self *OSPath) Basename() string {
+	self.mu.Lock()
+	defer self.mu.Unlock()
+
 	if len(self.Components) > 0 {
 		return self.Components[len(self.Components)-1]
 	}
@@ -135,7 +193,7 @@ func (self *OSPath) TrimComponents(components ...string) *OSPath {
 	for idx, c := range result.Components {
 		if idx >= len(components) || c != components[idx] {
 			result := &OSPath{
-				Components:  self.Components[idx:],
+				Components:  utils.CopySlice(self.Components[idx:]),
 				pathspec:    self.pathspec,
 				Manipulator: self.Manipulator,
 			}
@@ -230,12 +288,17 @@ type FileInfo interface {
 	Mode() os.FileMode
 }
 
+// Some filesystems return multiple files with the same basename. They
+// should implement this interface so we can properly dedup based on a
+// unique name.
+type UniqueBasename interface {
+	UniqueName() string
+}
+
 // A File reader with
 type ReadSeekCloser interface {
 	io.ReadSeeker
 	io.Closer
-
-	//	Stat() (FileInfo, error)
 }
 
 // Interface for accessing the filesystem.
@@ -247,6 +310,8 @@ type FileSystemAccessor interface {
 	Open(path string) (ReadSeekCloser, error)
 	Lstat(filename string) (FileInfo, error)
 
+	// Converts from a string path to an OSPath suitable for this
+	// accessor.
 	ParsePath(filename string) (*OSPath, error)
 
 	// The new more efficient API

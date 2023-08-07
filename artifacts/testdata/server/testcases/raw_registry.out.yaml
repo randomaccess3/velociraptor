@@ -1,6 +1,6 @@
 SELECT mock(plugin='info', results=[dict(OS='windows'), dict(OS='windows')] ) FROM scope()[
  {
-  "mock(plugin='info', results= [dict(OS='windows'), dict(OS='windows')])": null
+  "mock(plugin='info', results=[dict(OS='windows'), dict(OS='windows')])": null
  }
 ]SELECT LastModified, Binary, Name, Size, ProductName, Publisher, BinFileVersion FROM Artifact.Windows.System.Amcache( source="InventoryApplicationFile", amCacheGlob=srcDir+"/artifacts/testdata/files/Amcache.hve") LIMIT 5[
  {
@@ -455,5 +455,13 @@ SELECT mock(plugin='info', results=[dict(OS='windows'), dict(OS='windows')] ) FR
    "lmpwd_hash": "\u0002\u0002",
    "ntpwd_hash": "\u0002\u0002\u0010"
   }
+ }
+]SELECT utf16(string=read_file(filename=pathspec( Path="\\Root\\DeviceCensus\\Processor\\ProcessorIdentifier", DelegatePath=srcDir+"/artifacts/testdata/files/Amcache.hve", DelegateAccessor='file'), accessor="raw_reg")) FROM scope()[
+ {
+  "utf16(string=read_file(filename=pathspec(Path=\"\\\\Root\\\\DeviceCensus\\\\Processor\\\\ProcessorIdentifier\", DelegatePath=srcDir + \"/artifacts/testdata/files/Amcache.hve\", DelegateAccessor='file'), accessor=\"raw_reg\"))": "Intel64 Family 6 Model 62 Stepping 4\u0000"
+ }
+]SELECT utf16(string=read_file(filename=pathspec( Path="\\Root\\DeviceCensus\\WritePermissionsCheck", DelegatePath=srcDir+"/artifacts/testdata/files/Amcache.hve", DelegateAccessor='file'), accessor="raw_reg")) FROM scope()[
+ {
+  "utf16(string=read_file(filename=pathspec(Path=\"\\\\Root\\\\DeviceCensus\\\\WritePermissionsCheck\", DelegatePath=srcDir + \"/artifacts/testdata/files/Amcache.hve\", DelegateAccessor='file'), accessor=\"raw_reg\"))": "\u0001\u0000"
  }
 ]

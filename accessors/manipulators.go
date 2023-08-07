@@ -130,6 +130,8 @@ func (self LinuxPathManipulator) AsPathSpec(path *OSPath) *PathSpec {
 	if result == nil {
 		result = &PathSpec{}
 		path.pathspec = result
+	} else {
+		result = result.Copy()
 	}
 	result.Path = "/" + strings.Join(path.Components, "/")
 	return result
@@ -159,6 +161,10 @@ var (
 	driveRegex = regexp.MustCompile(
 		`(?i)^[/\\]?([a-z]:)(.*)`)
 
+	// https://docs.microsoft.com/en-us/dotnet/standard/io/file-path-formats#unc-paths
+	uncRegex = regexp.MustCompile(
+		`(?i)^(\\\\[^\\]+)\\(.*)`)
+
 	deviceDriveRegex = regexp.MustCompile(
 		`(?i)^(\\\\[\?\.]\\[a-zA-Z]:)(.*)`)
 
@@ -171,6 +177,9 @@ var (
 // component. For example:
 // C:\Windows -> "C:\", "Windows"
 // \\.\c:\Windows -> "\\.\C:", "Windows"
+
+// We also support UNC paths like:
+// \\hostname\path\to\file -> "\\hostname", "path", "to", "file"
 
 // Other components that contain path separators need to be properly
 // quoted as usual:
@@ -195,6 +204,12 @@ func (self WindowsPathManipulator) PathParse(path string, result *OSPath) error 
 	}
 
 	m = deviceDirectoryRegex.FindStringSubmatch(path)
+	if len(m) != 0 {
+		result.Components = append([]string{m[1]}, utils.SplitComponents(m[2])...)
+		return nil
+	}
+
+	m = uncRegex.FindStringSubmatch(path)
 	if len(m) != 0 {
 		result.Components = append([]string{m[1]}, utils.SplitComponents(m[2])...)
 		return nil
@@ -283,6 +298,8 @@ func (self WindowsNTFSManipulator) AsPathSpec(path *OSPath) *PathSpec {
 	if result == nil {
 		result = &PathSpec{}
 		path.pathspec = result
+	} else {
+		result = result.Copy()
 	}
 
 	// The first component is usually the drive letter or device and
@@ -450,6 +467,8 @@ func (self PathSpecPathManipulator) AsPathSpec(path *OSPath) *PathSpec {
 	if result == nil {
 		result = &PathSpec{}
 		path.pathspec = result
+	} else {
+		result = result.Copy()
 	}
 	return result
 }
@@ -529,6 +548,8 @@ func (self FileStorePathManipulator) AsPathSpec(path *OSPath) *PathSpec {
 	if result == nil {
 		result = &PathSpec{}
 		path.pathspec = result
+	} else {
+		result = result.Copy()
 	}
 
 	// The first component is usually the drive letter or device and
@@ -597,4 +618,110 @@ func NewFileStorePath(path string) (*OSPath, error) {
 
 	err := manipulator.PathParse(path, result)
 	return result, err
+}
+
+// The OSPath object for raw files is unchanged - We must pass exactly
+// the same form as given to the underlying filesystem APIs. On
+// Windows this is some kind of device description like
+// \\?\GLOBALROOT\Device\Harddisk0\DR0 for example, but we never
+// attempt to parse it - just forward to the API as is.
+type RawFileManipulator struct{}
+
+func (self RawFileManipulator) AsPathSpec(path *OSPath) *PathSpec {
+	result := &PathSpec{}
+	if len(path.Components) == 0 {
+		return result
+	}
+
+	result.Path = path.Components[0]
+	return result
+}
+
+func (self RawFileManipulator) PathJoin(path *OSPath) string {
+	if len(path.Components) == 0 {
+		return ""
+	}
+	return path.Components[0]
+}
+
+func (self RawFileManipulator) PathParse(
+	path string, result *OSPath) error {
+	result.Components = []string{path}
+	return nil
+}
+
+func NewRawFilePath(path string) (*OSPath, error) {
+	manipulator := &RawFileManipulator{}
+	return &OSPath{
+		Components:  []string{path},
+		Manipulator: manipulator,
+	}, nil
+}
+
+// Represent files inside the zip file for the offline collector -
+// Similar to LinuxPathManipulator except that extra escaping is used
+// to avoid more characters.
+type ZipFileManipulator struct{}
+
+func (self ZipFileManipulator) AsPathSpec(path *OSPath) *PathSpec {
+	result := path.pathspec
+	if result == nil {
+		result = &PathSpec{}
+		path.pathspec = result
+	}
+	components := make([]string, 0, len(path.Components))
+	for _, c := range path.Components {
+		if c != "" {
+			components = append(components, utils.SanitizeString(c))
+		}
+	}
+	result.Path = "/" + strings.Join(components, "/")
+	return result
+}
+
+func (self ZipFileManipulator) PathJoin(path *OSPath) string {
+	components := []string{}
+	for _, c := range path.Components {
+		components = append(components, utils.SanitizeStringForZip(c))
+	}
+	return "/" + strings.Join(components, "/")
+}
+
+func (self ZipFileManipulator) PathParse(
+	path string, result *OSPath) error {
+	osPathUnserializations.Inc()
+
+	err := maybeParsePathSpec(path, result)
+	if err != nil {
+		return err
+	}
+	path = result.pathspec.Path
+
+	components := strings.Split(path, "/")
+	result.Components = make([]string, 0, len(components))
+	for _, c := range components {
+		if c == "" || c == "." || c == ".." {
+			continue
+		}
+		result.Components = append(result.Components,
+			utils.UnsanitizeComponentForZip(c))
+	}
+	return nil
+}
+
+func NewZipFilePath(path string) (*OSPath, error) {
+	manipulator := &ZipFileManipulator{}
+	result := &OSPath{
+		Manipulator: manipulator,
+	}
+	err := manipulator.PathParse(path, result)
+	return result, err
+}
+
+func MustNewZipFilePath(path string) *OSPath {
+	res, err := NewZipFilePath(path)
+	if err != nil {
+		panic(err)
+	}
+	return res
 }

@@ -8,6 +8,7 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
+	"www.velocidex.com/golang/go-ntfs/parser"
 	ntfs "www.velocidex.com/golang/go-ntfs/parser"
 	"www.velocidex.com/golang/velociraptor/accessors"
 	"www.velocidex.com/golang/velociraptor/constants"
@@ -73,7 +74,6 @@ func (self *NTFSCachedContext) Start(
 	ctx context.Context, scope vfilter.Scope) (err error) {
 
 	cache_life := vql_constants.GetNTFSCacheTime(ctx, scope)
-	done := self.done
 
 	lru_size := vql_subsystem.GetIntFromRow(
 		self.scope, self.scope, constants.NTFS_CACHE_SIZE)
@@ -99,10 +99,14 @@ func (self *NTFSCachedContext) Start(
 	go func() {
 		for {
 			select {
-			case <-done:
+			case <-self.done:
+				self.mu.Lock()
+				self.done = nil
+				self.mu.Unlock()
 				return
 
 			case <-time.After(cache_life):
+				scope.Log("DEBUG:Resetting NTFS Cache")
 				self.Close()
 			}
 		}
@@ -142,6 +146,8 @@ func (self *NTFSCachedContext) GetNTFSContext() (*ntfs.NTFSContext, error) {
 		return nil, err
 	}
 
+	ntfs_ctx.SetOptions(GetScopeOptions(self.scope))
+
 	self.ntfs_ctx = ntfs_ctx
 
 	return self.ntfs_ctx, nil
@@ -168,6 +174,7 @@ func GetNTFSCache(scope vfilter.Scope,
 			accessor: accessor,
 			device:   device,
 			scope:    scope,
+			done:     make(chan bool),
 		}
 		err := cache_ctx.Start(context.Background(), scope)
 		if err != nil {
@@ -191,4 +198,27 @@ func GetNTFSCache(scope vfilter.Scope,
 	}
 
 	return cache_ctx, nil
+}
+
+func GetScopeOptions(scope vfilter.Scope) parser.Options {
+	directory_depth := vql_subsystem.GetIntFromRow(
+		scope, scope, constants.NTFS_MAX_DIRECTORY_DEPTH)
+	if directory_depth == 0 {
+		directory_depth = 20
+	}
+
+	max_links := vql_subsystem.GetIntFromRow(
+		scope, scope, constants.NTFS_MAX_LINKS)
+	if max_links == 0 {
+		max_links = 20
+	}
+
+	include_short_names := vql_subsystem.GetBoolFromRow(
+		scope, scope, constants.NTFS_INCLUDE_SHORT_NAMES)
+
+	return parser.Options{
+		MaxDirectoryDepth: int(directory_depth),
+		MaxLinks:          int(max_links),
+		IncludeShortNames: include_short_names,
+	}
 }

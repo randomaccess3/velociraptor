@@ -1,6 +1,6 @@
 /*
-   Velociraptor - Hunting Evil
-   Copyright (C) 2019 Velocidex Innovations.
+   Velociraptor - Dig Deeper
+   Copyright (C) 2019-2022 Rapid7 Inc.
 
    This program is free software: you can redistribute it and/or modify
    it under the terms of the GNU Affero General Public License as published
@@ -26,7 +26,9 @@ import (
 	ntfs "www.velocidex.com/golang/go-ntfs/parser"
 	"www.velocidex.com/golang/velociraptor/accessors"
 	"www.velocidex.com/golang/velociraptor/accessors/ntfs/readers"
+	"www.velocidex.com/golang/velociraptor/acls"
 	utils "www.velocidex.com/golang/velociraptor/utils"
+	"www.velocidex.com/golang/velociraptor/vql"
 	vql_subsystem "www.velocidex.com/golang/velociraptor/vql"
 	vfilter "www.velocidex.com/golang/vfilter"
 	"www.velocidex.com/golang/vfilter/arg_parser"
@@ -78,7 +80,7 @@ func (self NTFSFunction) Call(
 	}
 
 	if arg.Inode != "" {
-		mft_idx, _, _, err := ntfs.ParseMFTId(arg.Inode)
+		mft_idx, _, _, _, err := ntfs.ParseMFTId(arg.Inode)
 		if err != nil {
 			scope.Log("parse_ntfs: %v", err)
 			return &vfilter.Null{}
@@ -118,8 +120,10 @@ func (self NTFSFunction) Call(
 }
 
 type MFTScanPluginArgs struct {
-	Filename string `vfilter:"required,field=filename,doc=The MFT file."`
-	Accessor string `vfilter:"optional,field=accessor,doc=The accessor to use."`
+	Filename   *accessors.OSPath `vfilter:"required,field=filename,doc=The MFT file."`
+	Accessor   string            `vfilter:"optional,field=accessor,doc=The accessor to use."`
+	Prefix     *accessors.OSPath `vfilter:"optional,field=prefix,doc=If specified we prefix all paths with this path."`
+	StartEntry int64             `vfilter:"optional,field=start,doc=The first entry to scan."`
 }
 
 type MFTScanPlugin struct{}
@@ -152,7 +156,8 @@ func (self MFTScanPlugin) Call(
 			scope.Log("parse_mft: %v", err)
 			return
 		}
-		fd, err := accessor.Open(arg.Filename)
+
+		fd, err := accessor.OpenWithOSPath(arg.Filename)
 		if err != nil {
 			scope.Log("parse_mft: Unable to open file %s: %v",
 				arg.Filename, err)
@@ -160,15 +165,21 @@ func (self MFTScanPlugin) Call(
 		}
 		defer fd.Close()
 
-		st, err := accessor.Lstat(arg.Filename)
+		st, err := accessor.LstatWithOSPath(arg.Filename)
 		if err != nil {
 			scope.Log("parse_mft: Unable to open file %s: %v",
 				arg.Filename, err)
 			return
 		}
 
-		for item := range ntfs.ParseMFTFile(
-			ctx, utils.ReaderAtter{Reader: fd}, st.Size(), 0x1000, 0x400) {
+		options := readers.GetScopeOptions(scope)
+		if arg.Prefix != nil {
+			options.PrefixComponents = arg.Prefix.Components
+		}
+
+		for item := range ntfs.ParseMFTFileWithOptions(
+			ctx, utils.MakeReaderAtter(fd), st.Size(),
+			0x1000, 0x400, arg.StartEntry, options) {
 			select {
 			case <-ctx.Done():
 				return
@@ -183,9 +194,11 @@ func (self MFTScanPlugin) Call(
 
 func (self MFTScanPlugin) Info(scope vfilter.Scope, type_map *vfilter.TypeMap) *vfilter.PluginInfo {
 	return &vfilter.PluginInfo{
-		Name:    "parse_mft",
-		Doc:     "Scan the $MFT from an NTFS volume.",
-		ArgType: type_map.AddType(scope, &MFTScanPluginArgs{}),
+		Name:     "parse_mft",
+		Doc:      "Scan the $MFT from an NTFS volume.",
+		ArgType:  type_map.AddType(scope, &MFTScanPluginArgs{}),
+		Version:  2,
+		Metadata: vql.VQLMetadata().Permissions(acls.FILESYSTEM_READ).Build(),
 	}
 }
 
@@ -216,7 +229,7 @@ func (self NTFSI30ScanPlugin) Call(
 		}
 
 		if arg.Inode != "" {
-			mft_idx, _, _, err := ntfs.ParseMFTId(arg.Inode)
+			mft_idx, _, _, _, err := ntfs.ParseMFTId(arg.Inode)
 			if err != nil {
 				scope.Log("parse_ntfs_i30: %v", err)
 				return
@@ -291,9 +304,10 @@ func (self NTFSRangesPlugin) Call(
 		attr_type := int64(0)
 		attr_id := int64(0)
 		mft_idx := int64(arg.MFT)
+		stream_name := ""
 
 		if arg.Inode != "" {
-			mft_idx, attr_type, attr_id, err = ntfs.ParseMFTId(arg.Inode)
+			mft_idx, attr_type, attr_id, stream_name, err = ntfs.ParseMFTId(arg.Inode)
 			if err != nil {
 				scope.Log("parse_ntfs_ranges: %v", err)
 				return
@@ -320,7 +334,7 @@ func (self NTFSRangesPlugin) Call(
 		}
 
 		reader, err := ntfs.OpenStream(ntfs_ctx, mft_entry,
-			uint64(attr_type), uint16(attr_id))
+			uint64(attr_type), uint16(attr_id), stream_name)
 		if err != nil {
 			scope.Log("parse_ntfs_ranges: %v", err)
 			return

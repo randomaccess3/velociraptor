@@ -1,13 +1,10 @@
 package main
 
 import (
-	"archive/zip"
 	"context"
 	"fmt"
 	"io"
 	"io/ioutil"
-	"net/http"
-	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -18,11 +15,13 @@ import (
 	"github.com/Velocidex/yaml/v2"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/stretchr/testify/suite"
 	"www.velocidex.com/golang/velociraptor/config"
 	config_proto "www.velocidex.com/golang/velociraptor/config/proto"
 	"www.velocidex.com/golang/velociraptor/constants"
 	"www.velocidex.com/golang/velociraptor/file_store"
 	"www.velocidex.com/golang/velociraptor/paths"
+	"www.velocidex.com/golang/velociraptor/third_party/zip"
 	"www.velocidex.com/golang/velociraptor/utils"
 )
 
@@ -35,16 +34,25 @@ func init() {
 }
 
 type CollectorTestSuite struct {
+	suite.Suite
+
 	binary      string
 	extension   string
 	tmpdir      string
 	config_file string
 	config_obj  *config_proto.Config
-	test_server *httptest.Server
+
+	OS_TYPE string
 }
 
-func CollectorSetupTest(t *testing.T) *CollectorTestSuite {
-	self := &CollectorTestSuite{}
+func (self *CollectorTestSuite) SetupSuite() {
+	self.findAndPrepareBinary()
+	self.addArtifactDefinitions()
+	self.uploadToolDefinitions()
+}
+
+func (self *CollectorTestSuite) findAndPrepareBinary() {
+	t := self.T()
 
 	if runtime.GOOS == "windows" {
 		self.extension = ".exe"
@@ -70,7 +78,7 @@ func CollectorSetupTest(t *testing.T) *CollectorTestSuite {
 
 	// Copy the binary into the tmpdir
 	dest_file := filepath.Join(self.tmpdir, filepath.Base(self.binary))
-	err = utils.CopyFile(context.Background(), self.binary, dest_file, 0644)
+	err = utils.CopyFile(context.Background(), self.binary, dest_file, 0755)
 	assert.NoError(t, err)
 
 	self.binary = dest_file
@@ -90,52 +98,26 @@ func CollectorSetupTest(t *testing.T) *CollectorTestSuite {
 	self.config_obj.Datastore.FilestoreDirectory = self.tmpdir
 	self.config_obj.Frontend.DoNotCompressArtifacts = true
 
-	// Start a web server that serves the filesystem - NOTE: Normally
-	// this would be served from the Velociraptor server itself but
-	// here we dont want to start it so we serve simple HTTP server
-	// and require all tools to be served remotes from these URL.
-	self.test_server = httptest.NewServer(
-		http.FileServer(http.Dir(self.tmpdir)))
-
-	// Set the server URL correctly.
-	self.config_obj.Client.ServerUrls = []string{
-		self.test_server.URL + "/",
-	}
-
 	serialized, err := yaml.Marshal(self.config_obj)
 	assert.NoError(t, err)
 
 	fd.Write(serialized)
 	fd.Close()
 
-	return self
-}
-
-func (self *CollectorTestSuite) TearDownTest() {
-	os.RemoveAll(self.tmpdir)
-	self.test_server.Close()
-}
-
-func TestCollector(t *testing.T) {
-	t.Parallel()
-
-	self := CollectorSetupTest(t)
-	defer self.TearDownTest()
-
-	OS_TYPE := "Linux"
+	// Record the OS Type we are running on.
+	self.OS_TYPE = "Linux"
 	if runtime.GOOS == "windows" {
-		OS_TYPE = "Windows"
+		self.OS_TYPE = "Windows"
 	} else if runtime.GOOS == "darwin" {
-		OS_TYPE = "Darwin"
+		self.OS_TYPE = "Darwin"
 	}
+}
 
-	// Change into the tmpdir
-	old_dir, _ := os.Getwd()
-	defer os.Chdir(old_dir)
+func (self *CollectorTestSuite) addArtifactDefinitions() {
+	t := self.T()
 
-	os.Chdir(self.tmpdir)
-
-	// Create a new artifact..
+	// Create new artifacts and just save them on the filesystem - we
+	// dont need a real repository manager.
 	file_store_factory := file_store.GetFileStore(self.config_obj)
 
 	fd, err := file_store_factory.WriteFile(paths.GetArtifactDefintionPath(
@@ -150,11 +132,11 @@ tools:
 
 sources:
  - query: |
-     LET binary <= SELECT FullPath, Name
+     LET binary <= SELECT OSPath, Name
          FROM Artifact.Generic.Utils.FetchBinary(
               ToolName="MyTool", SleepDuration='0')
 
-     LET data_file <= SELECT FullPath, Name
+     LET data_file <= SELECT OSPath, Name
          FROM Artifact.Generic.Utils.FetchBinary(
               ToolName="MyDataFile", SleepDuration='0',
               IsExecutable=FALSE)
@@ -162,10 +144,10 @@ sources:
      LET _ <= sleep(time=1)
 
      SELECT "Foobar", Stdout, binary[0].Name,
-            data_file[0].FullPath AS DataFilePath,
-            data_file[0].FullPath =~ ".yar$" AS HasYarExtension,
-            read_file(filename=data_file[0].FullPath) AS Data
-     FROM execve(argv=[binary[0].FullPath, "artifacts", "list"])
+            data_file[0].OSPath AS DataFilePath,
+            data_file[0].OSPath =~ ".yar$" AS HasYarExtension,
+            read_file(filename=data_file[0].OSPath) AS Data
+     FROM execve(argv=[binary[0].OSPath, "artifacts", "list"])
 `))
 	fd.Close()
 
@@ -184,81 +166,72 @@ sources:
  - query: |
      SELECT *, MyParameter, MyDefaultParameter
      FROM Artifact.Custom.TestArtifactDependent()
-
-reports:
- - type: HTML
-   template: |
-     <html><body><h1>This is the html report template</h1> {{ .main \
-            }} </body></html>
-
- - type: CLIENT
-   template: |
-     # This is the report.
-
-     {{ Query "SELECT * FROM source()" | Table }}
-
-     {{ $foundit := Query "SELECT * FROM source()" | Expand }}
-
-     {{ if $foundit }}
-
-     ## Found a Scheduled Task
-
-     {{ else }}
-
-     ## Did not find a Scheduled Task!
-
-     {{ end }}
 `))
 	fd.Close()
-	cmd := exec.Command(self.binary, "--config", self.config_file,
-		"artifacts", "show", "Custom.TestArtifact")
-	out, err := cmd.CombinedOutput()
-	fmt.Println(string(out))
-	require.NoError(t, err)
 
-	var os_name string
-	for _, os_name = range []string{"Windows", "Windows_x86", "Linux", "Darwin"} {
-		cmd = exec.Command(self.binary, "--config", self.config_file,
+	fd, err = file_store_factory.WriteFile(
+		paths.GetArtifactDefintionPath("Custom.TestHello"))
+	assert.NoError(t, err)
+
+	fd.Truncate()
+	fd.Write([]byte(`name: Custom.TestHello
+sources:
+ - query: SELECT "Hello" AS Hi FROM scope()
+`))
+	fd.Close()
+}
+
+func (self *CollectorTestSuite) uploadToolDefinitions() {
+	t := self.T()
+
+	// Upload a small file (the config file) for all the other
+	// architectures.
+	for _, os_name := range []string{"Windows", "Windows_x86", "Linux", "Darwin"} {
+		cmd := exec.Command(self.binary, "--config", self.config_file,
 			"tools", "upload", "--name", "Velociraptor"+os_name,
-			self.config_file,
-			"--serve_remote")
-		out, err = cmd.CombinedOutput()
+			"--tool_version", constants.VERSION,
+			self.config_file)
+		out, err := cmd.CombinedOutput()
 		fmt.Println(string(out))
 		require.NoError(t, err)
 	}
 
-	switch runtime.GOOS {
-	case "windows":
-		os_name = "Windows"
-	case "linux":
-		os_name = "Linux"
-	case "darwin":
-		os_name = "Darwin"
-	}
-
-	cmd = exec.Command(self.binary, "--config", self.config_file,
-		"tools", "upload", "--name", "Velociraptor"+os_name,
-		self.test_server.URL+"/"+filepath.Base(self.binary),
-		"--serve_remote")
-	out, err = cmd.CombinedOutput()
+	// Upload the real thing for the architecture we are running on.
+	cmd := exec.Command(self.binary, "--config", self.config_file,
+		"tools", "upload", "--name", "Velociraptor"+self.OS_TYPE,
+		"--tool_version", constants.VERSION,
+		self.binary)
+	out, err := cmd.CombinedOutput()
 	fmt.Println(string(out))
 	require.NoError(t, err)
 
 	// Make sure the binary is proprly added.
 	assert.Regexp(t, "name: Velociraptor", string(out))
 
-	// Not served locally - download on demand should have no hash
-	// and serve_locally should be false.
-	assert.NotRegexp(t, "serve_locally", string(out))
-	assert.NotRegexp(t, "hash: .+", string(out))
+	// Should have a hash
+	assert.Regexp(t, "hash: .+", string(out))
 
+	// Add ourselves again as a tool called MyTool - the artifact will
+	// call it.
 	cmd = exec.Command(self.binary, "--config", self.config_file,
-		"tools", "upload", "--name", "MyTool",
-		self.test_server.URL+"/"+filepath.Base(self.binary),
-		"--serve_remote")
+		"tools", "upload", "--name", "MyTool", self.binary)
 	out, err = cmd.CombinedOutput()
 	fmt.Println(string(out))
 	require.NoError(t, err)
+}
+
+func (self *CollectorTestSuite) TearDownSuite() {
+	os.RemoveAll(self.tmpdir)
+}
+
+func (self *CollectorTestSuite) TestCollectorPlain() {
+	t := self.T()
+
+	// Change into the tmpdir
+	old_dir, _ := os.Getwd()
+	defer os.Chdir(old_dir)
+
+	os.Chdir(self.tmpdir)
 
 	// Create an embedded data file
 	data_file_name := filepath.Join(self.tmpdir, "test.yar")
@@ -270,21 +243,21 @@ reports:
 		fd.Close()
 	}
 
-	cmd = exec.Command(self.binary, "--config", self.config_file,
-		"tools", "upload", "--name", "MyDataFile",
-		self.test_server.URL+"/test.yar",
-		"--serve_remote")
-	out, err = cmd.CombinedOutput()
+	// Add it as a tool
+	cmd := exec.Command(self.binary, "--config", self.config_file,
+		"tools", "upload", "--name", "MyDataFile", data_file_name)
+	out, err := cmd.CombinedOutput()
 	fmt.Println(string(out))
 	require.NoError(t, err)
 
+	// Where we will write the collection.
 	output_zip := filepath.Join(self.tmpdir, "output.zip")
 
 	// Now we want to create a stand alone collector. We do this
 	// by collecting the Server.Utils.CreateCollector artifact
 	cmdline := []string{"--config", self.config_file, "-v",
 		"artifacts", "collect", "Server.Utils.CreateCollector",
-		"--args", "OS=" + OS_TYPE,
+		"--args", "OS=" + self.OS_TYPE,
 		"--args", "artifacts=[\"Custom.TestArtifact\"]",
 		"--args", "parameters={\"Custom.TestArtifact\":{\"MyParameter\": \"MyValue\"}}",
 		"--args", "target=ZIP",
@@ -299,6 +272,7 @@ reports:
 	fmt.Println(string(out))
 	require.NoError(t, err)
 
+	// Inspect the resulting binary - it should have a zip appended.
 	r, err := zip.OpenReader(output_zip)
 	assert.NoError(t, err)
 
@@ -310,7 +284,7 @@ reports:
 	for _, f := range r.File {
 		fmt.Printf("Contents of collector:  %s (%v bytes)\n",
 			f.Name, f.UncompressedSize)
-		if strings.HasPrefix(f.Name, "Collector") {
+		if strings.HasPrefix(f.Name, "uploads/scope/Collector") {
 			fmt.Printf("Extracting %v to %v\n", f.Name, output_executable)
 
 			rc, err := f.Open()
@@ -329,14 +303,14 @@ reports:
 		}
 	}
 
-	// Now just run the executable.
+	// Now just run the executable to check the config.
 	fmt.Printf("Config show\n")
 	cmd = exec.Command(output_executable, "config", "show")
 	out, err = cmd.CombinedOutput()
 	fmt.Println(string(out))
 	require.NoError(t, err)
 
-	// Now just run the executable.
+	// Run the executable and see what it collects.
 	cmd = exec.Command(output_executable)
 	out, err = cmd.CombinedOutput()
 	fmt.Println(string(out))
@@ -347,17 +321,32 @@ reports:
 	assert.NoError(t, err)
 	assert.Equal(t, 1, len(zip_files))
 
+	// Clean it up after we are done.
+	defer func() {
+		err := os.Remove(zip_files[0])
+		assert.NoError(t, err)
+	}()
+
 	// Inspect the collection zip file - there should be a single
 	// artifact output from our custom artifact, and the data it
 	// produces should have the string Foobar in it.
 	r, err = zip.OpenReader(zip_files[0])
 	assert.NoError(t, err)
 
+	defer r.Close()
 	assert.True(t, len(r.File) > 0)
 
+	checked := false
+
 	for _, f := range r.File {
+		if f.Name != "results/Custom.TestArtifact.json" {
+			continue
+		}
+
+		checked = true
+
 		fmt.Printf("Contents of %s:\n", f.Name)
-		assert.Equal(t, f.Name, "Custom.TestArtifact.json")
+		assert.Equal(t, f.Name, "results/Custom.TestArtifact.json")
 
 		rc, err := f.Open()
 		assert.NoError(t, err)
@@ -377,34 +366,126 @@ reports:
 		assert.Contains(t, string(data), `"HasYarExtension":true`)
 	}
 
-	// Inspect the produced HTML report.
-	html_files, err := filepath.Glob("Collection-*.html")
+	assert.True(t, checked)
+}
+
+// Check that we can properly generated encrypted containers.
+func (self *CollectorTestSuite) TestCollectorEncrypted() {
+	t := self.T()
+
+	// Change into the tmpdir
+	old_dir, _ := os.Getwd()
+	defer os.Chdir(old_dir)
+
+	os.Chdir(self.tmpdir)
+
+	output_zip := filepath.Join(self.tmpdir, "output_enc.zip")
+
+	// Now we want to create a stand alone collector. We do this
+	// by collecting the Server.Utils.CreateCollector artifact
+	cmdline := []string{"--config", self.config_file, "-v",
+		"artifacts", "collect", "Server.Utils.CreateCollector",
+		"--args", "OS=" + self.OS_TYPE,
+		"--args", "artifacts=[\"Custom.TestHello\"]",
+		"--args", "parameters={\"Custom.TestHello\":{\"MyParameter\": \"MyValue\"}}",
+		"--args", "target=ZIP",
+		"--args", "opt_admin=N",
+		"--args", "opt_prompt=N",
+		"--args", "encryption_scheme=X509",
+		"--args", `encryption_args={"public_key":"","password":""}`,
+		"--output", output_zip,
+	}
+
+	cmd := exec.Command(self.binary, cmdline...)
+	out, err := cmd.CombinedOutput()
+	fmt.Println(string(out))
+	require.NoError(t, err)
+
+	r, err := zip.OpenReader(output_zip)
 	assert.NoError(t, err)
-	assert.Equal(t, 1, len(html_files))
 
-	html_fd, err := os.Open(html_files[0])
+	defer r.Close()
+
+	output_executable := filepath.Join(self.tmpdir, "collector"+self.extension)
+	for _, f := range r.File {
+		fmt.Printf("Contents of collector:  %s (%v bytes)\n",
+			f.Name, f.UncompressedSize)
+		if strings.HasPrefix(f.Name, "uploads/scope/Collector") {
+			fmt.Printf("Extracting %v to %v\n", f.Name, output_executable)
+
+			rc, err := f.Open()
+			assert.NoError(t, err)
+
+			out_fd, err := os.OpenFile(
+				output_executable, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0700)
+			assert.NoError(t, err)
+
+			n, err := io.Copy(out_fd, rc)
+			assert.NoError(t, err)
+			rc.Close()
+			out_fd.Close()
+
+			fmt.Printf("Copied %v bytes\n", n)
+		}
+	}
+
+	// Now just run the executable.
+	cmd = exec.Command(output_executable)
+	out, err = cmd.CombinedOutput()
+	fmt.Println(string(out))
+	require.NoError(t, err)
+
+	// There should be a collection now.
+	zip_files, err := filepath.Glob("Collection-*.zip")
+	assert.NoError(t, err)
+	assert.Equal(t, 1, len(zip_files))
+
+	// Clean up after we are done.
+	defer func() {
+		err := os.Remove(zip_files[0])
+		assert.NoError(t, err)
+	}()
+
+	// Inspect the collection zip file - The zip file is encrypted
+	// therefore contains only a single metadata file (with the
+	// encrypted session key) and an opaque data.zip member which is
+	// password encrypted.
+	r, err = zip.OpenReader(zip_files[0])
 	assert.NoError(t, err)
 
-	data, err := ioutil.ReadAll(html_fd)
-	assert.NoError(t, err)
+	defer r.Close()
 
-	// Ensure the report contains the data that was passed.
-	assert.Contains(t, string(data), "MyValue")
+	assert.True(t, len(r.File) > 0)
 
-	// And the default parameter is still there.
-	assert.Contains(t, string(data), "DefaultMyDefaultParameter")
+	names := []string{}
+	for _, f := range r.File {
+		fmt.Printf("Contents of %s:\n", f.Name)
+		names = append(names, f.Name)
 
-	assert.Contains(t, string(data), "Foobar")
-	assert.Contains(t, string(data), "This is the report")
+		switch f.Name {
+		case "metadata.json":
+			rc, err := f.Open()
+			assert.NoError(t, err)
 
-	// Make sure we found the artifact in the report
-	assert.Contains(t, string(data), "Windows.System.TaskScheduler")
-	assert.Contains(t, string(data), "Found a Scheduled Task")
+			data, err := ioutil.ReadAll(rc)
+			assert.NoError(t, err)
 
-	// Check that we used the default template from the
-	// Reporting.Default artifact:
-	assert.Contains(t, string(data), "<html>")
-	assert.Contains(t, string(data), "This is the html report template")
+			// The metadata should contain information required to unpack
+			// the zip.
+			assert.Contains(t, string(data), "EncryptedPass")
 
-	// fmt.Println(string(data))
+			// Encryption scheme.
+			assert.Contains(t, string(data), `"Scheme": "X509"`)
+		}
+	}
+
+	assert.Equal(t, []string{"metadata.json", "data.zip"}, names)
+}
+
+func TestCollector(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping test in short mode.")
+	}
+
+	suite.Run(t, &CollectorTestSuite{})
 }

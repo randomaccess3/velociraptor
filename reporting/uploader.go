@@ -2,24 +2,22 @@ package reporting
 
 import (
 	"context"
-	"crypto/md5"
-	"crypto/sha256"
-	"encoding/hex"
 	"io"
 	"time"
 
+	"github.com/go-errors/errors"
 	"www.velocidex.com/golang/velociraptor/accessors"
 	config_proto "www.velocidex.com/golang/velociraptor/config/proto"
 	"www.velocidex.com/golang/velociraptor/file_store"
+	"www.velocidex.com/golang/velociraptor/file_store/uploader"
 	"www.velocidex.com/golang/velociraptor/paths"
 	"www.velocidex.com/golang/velociraptor/uploads"
-	"www.velocidex.com/golang/velociraptor/utils"
 	"www.velocidex.com/golang/vfilter"
 )
 
 type NotebookUploader struct {
-	config_obj  *config_proto.Config
-	PathManager *paths.NotebookCellPathManager
+	config_obj                 *config_proto.Config
+	notebook_cell_path_manager *paths.NotebookCellPathManager
 }
 
 func (self *NotebookUploader) Upload(
@@ -27,7 +25,7 @@ func (self *NotebookUploader) Upload(
 	scope vfilter.Scope,
 	filename *accessors.OSPath,
 	accessor string,
-	store_as_name string,
+	store_as_name *accessors.OSPath,
 	expected_size int64,
 	mtime time.Time,
 	atime time.Time,
@@ -36,27 +34,51 @@ func (self *NotebookUploader) Upload(
 	reader io.Reader) (
 	*uploads.UploadResponse, error) {
 
-	if store_as_name == "" {
-		store_as_name = filename.String()
+	if filename == nil {
+		return nil, errors.New("Not found")
 	}
-	dest_path_spec := self.PathManager.GetUploadsFile(store_as_name)
 
+	if store_as_name == nil {
+		store_as_name = filename
+	}
+
+	cached, pres, closer := uploads.DeduplicateUploads(scope, store_as_name)
+	defer closer()
+	if pres {
+		return cached, nil
+	}
+
+	dest_path_spec := self.notebook_cell_path_manager.GetUploadsFile(
+		store_as_name.String())
+
+	// Use the filestore uploader to upload the file into the
+	// filestore.
 	file_store_factory := file_store.GetFileStore(self.config_obj)
-	writer, err := file_store_factory.WriteFile(dest_path_spec)
+	delegate_uploader := uploader.NewFileStoreUploader(
+		self.config_obj, file_store_factory,
+		// This is the directory that will contain the upload
+		dest_path_spec.Dir())
+
+	// Store the file in the notebook. All files will be stored as
+	// flat filenames in the same directory.
+	res, err := delegate_uploader.Upload(ctx, scope, filename, accessor,
+		accessors.MustNewGenericOSPath("/").Append(dest_path_spec.Base()),
+		expected_size, mtime, atime, ctime, btime, reader)
 	if err != nil {
 		return nil, err
 	}
-	defer writer.Close()
 
-	md5_sum := md5.New()
-	sha_sum := sha256.New()
+	result := &uploads.UploadResponse{
+		Path:       store_as_name.String(),
+		StoredName: store_as_name.String(),
+		Accessor:   accessor,
+		Components: dest_path_spec.Components(),
+		Size:       res.Size,
+		StoredSize: res.StoredSize,
+		Sha256:     res.Sha256,
+		Md5:        res.Md5,
+	}
 
-	n, err := utils.Copy(ctx, writer, io.TeeReader(
-		io.TeeReader(reader, sha_sum), md5_sum))
-	return &uploads.UploadResponse{
-		Path:   store_as_name,
-		Size:   uint64(n),
-		Sha256: hex.EncodeToString(sha_sum.Sum(nil)),
-		Md5:    hex.EncodeToString(md5_sum.Sum(nil)),
-	}, err
+	uploads.CacheUploadResult(scope, store_as_name, result)
+	return result, nil
 }

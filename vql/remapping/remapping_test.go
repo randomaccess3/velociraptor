@@ -15,12 +15,12 @@ import (
 	"www.velocidex.com/golang/velociraptor/json"
 	"www.velocidex.com/golang/velociraptor/logging"
 	"www.velocidex.com/golang/velociraptor/services"
-	vql_subsystem "www.velocidex.com/golang/velociraptor/vql"
 	"www.velocidex.com/golang/vfilter"
 
 	_ "www.velocidex.com/golang/velociraptor/accessors/file"
 	_ "www.velocidex.com/golang/velociraptor/accessors/raw_registry"
 	_ "www.velocidex.com/golang/velociraptor/result_sets/timed"
+	"www.velocidex.com/golang/velociraptor/vql/acl_managers"
 	_ "www.velocidex.com/golang/velociraptor/vql/filesystem"
 	_ "www.velocidex.com/golang/velociraptor/vql/protocols"
 )
@@ -78,12 +78,12 @@ func (self *RemapTestSuite) TestConfigFileRemap() {
 	// Just build a standard scope.
 	builder := services.ScopeBuilder{
 		Config:     self.ConfigObj,
-		ACLManager: vql_subsystem.NullACLManager{},
+		ACLManager: acl_managers.NullACLManager{},
 		Logger:     logging.NewPlainLogger(self.ConfigObj, &logging.FrontendComponent),
 		Env:        ordereddict.NewDict(),
 	}
 
-	manager, err := services.GetRepositoryManager()
+	manager, err := services.GetRepositoryManager(self.ConfigObj)
 	assert.NoError(self.T(), err)
 
 	scope := manager.BuildScope(builder)
@@ -100,7 +100,7 @@ func (self *RemapTestSuite) checkQueries(scope vfilter.Scope) {
 	// HKCU shorthand.
 	vql, err := vfilter.Parse(`
 SELECT * FROM glob(globs='/HKCU/Software/Classes/windows*', accessor='registry')
-ORDER BY FullPath
+ORDER BY OSPath
 `)
 	assert.NoError(self.T(), err)
 
@@ -113,8 +113,8 @@ ORDER BY FullPath
 
 	// Default accessor is the auto accessor.
 	vql, err = vfilter.Parse(`
-SELECT FullPath FROM glob(globs='D:\\ntuser*')
-ORDER BY FullPath
+SELECT OSPath FROM glob(globs='D:\\ntuser*')
+ORDER BY OSPath
 `)
 	assert.NoError(self.T(), err)
 
@@ -139,13 +139,13 @@ func (self *RemapTestSuite) TestRemapByPlugin() {
 	// Just build a standard scope.
 	builder := services.ScopeBuilder{
 		Config:     self.ConfigObj,
-		ACLManager: vql_subsystem.NullACLManager{},
+		ACLManager: acl_managers.NullACLManager{},
 		Logger:     logging.NewPlainLogger(self.ConfigObj, &logging.FrontendComponent),
 		Env: ordereddict.NewDict().
 			Set("RemappingConfig", serialized),
 	}
 
-	manager, err := services.GetRepositoryManager()
+	manager, err := services.GetRepositoryManager(self.ConfigObj)
 	assert.NoError(self.T(), err)
 
 	scope := manager.BuildScope(builder)

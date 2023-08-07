@@ -2,24 +2,23 @@ package sanity
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"regexp"
 	"strings"
 	"sync"
 
-	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 	"google.golang.org/protobuf/proto"
-	"www.velocidex.com/golang/velociraptor/acls"
 	api_proto "www.velocidex.com/golang/velociraptor/api/proto"
 	artifacts_proto "www.velocidex.com/golang/velociraptor/artifacts/proto"
 	config_proto "www.velocidex.com/golang/velociraptor/config/proto"
 	"www.velocidex.com/golang/velociraptor/datastore"
 	"www.velocidex.com/golang/velociraptor/logging"
 	"www.velocidex.com/golang/velociraptor/paths"
-	"www.velocidex.com/golang/velociraptor/reporting"
 	"www.velocidex.com/golang/velociraptor/services"
+	"www.velocidex.com/golang/velociraptor/services/notebook"
 	"www.velocidex.com/golang/velociraptor/utils"
 )
 
@@ -27,33 +26,61 @@ import (
 // conditions.
 type SanityChecks struct{}
 
-func (self *SanityChecks) Check(
+// Check sanity of general server state - this is only done for the root org.
+func (self *SanityChecks) CheckRootOrg(
 	ctx context.Context, config_obj *config_proto.Config) error {
 	if config_obj.Logging != nil &&
 		config_obj.Logging.OutputDirectory != "" {
 		err := utils.CheckDirWritable(config_obj.Logging.OutputDirectory)
 		if err != nil {
-			return errors.Wrap(
-				err, fmt.Sprintf("Unable to write logs to directory %v: ",
-					config_obj.Logging.OutputDirectory))
+			return fmt.Errorf("Unable to write logs to directory %v: %w",
+				config_obj.Logging.OutputDirectory, err)
 		}
 	}
 
-	// Make sure the initial user accounts are created with the
-	// administrator roles.
-	if config_obj.GUI != nil && config_obj.GUI.Authenticator != nil {
-		err := createInitialUsers(config_obj, config_obj.GUI.InitialUsers)
+	if isFirstRun(ctx, config_obj) {
+		// Create any initial orgs required.
+		err := createInitialOrgs(config_obj)
+		if err != nil {
+			return err
+		}
+
+		// Make sure the initial user accounts are created with the
+		// administrator roles.
+		err = createInitialUsers(ctx, config_obj)
+		if err != nil {
+			return err
+		}
+
+		err = startInitialArtifacts(ctx, config_obj)
+		if err != nil {
+			return err
+		}
+
+		err = setFirstRun(ctx, config_obj)
 		if err != nil {
 			return err
 		}
 	}
 
+	err := self.CheckForLockdown(ctx, config_obj)
+	if err != nil {
+		return err
+	}
+
+	err = self.CheckFrontendSettings(config_obj)
+	if err != nil {
+		return err
+	}
+
 	// Make sure our internal VelociraptorServer service account is
-	// properly created.
+	// properly created. Default accounts are created with org admin
+	// so they can add new orgs as required.
 	if config_obj.Client != nil && config_obj.Client.PinnedServerName != "" {
 		service_account_name := config_obj.Client.PinnedServerName
-		err := acls.GrantRoles(
-			config_obj, service_account_name, []string{"administrator"})
+		err := services.GrantRoles(
+			config_obj, service_account_name,
+			[]string{"administrator", "org_admin"})
 		if err != nil {
 			return err
 		}
@@ -83,22 +110,37 @@ func (self *SanityChecks) Check(
 	if config_obj.AutocertCertCache != "" {
 		err := utils.CheckDirWritable(config_obj.AutocertCertCache)
 		if err != nil {
-			return errors.Wrap(
-				err, fmt.Sprintf("Autocert cache directory not writable %v: ",
-					config_obj.AutocertCertCache))
+			return fmt.Errorf("Autocert cache directory not writable %v: %w",
+				config_obj.AutocertCertCache, err)
+		}
+	}
+
+	return nil
+}
+
+func (self *SanityChecks) Check(
+	ctx context.Context, config_obj *config_proto.Config) error {
+	if utils.IsRootOrg(config_obj.OrgId) {
+		err := self.CheckRootOrg(ctx, config_obj)
+		if err != nil {
+			return err
 		}
 	}
 
 	// Reindex all the notebooks.
-	notebooks, err := reporting.GetAllNotebooks(config_obj)
+	notebooks, err := notebook.GetAllNotebooks(config_obj)
 	if err != nil {
 		return err
 	}
 
+	notebook_manager, err := services.GetNotebookManager(config_obj)
+	if err != nil {
+		return err
+	}
 	for _, notebook := range notebooks {
 		if !strings.HasPrefix(notebook.NotebookId, "N.H.") &&
 			!strings.HasPrefix(notebook.NotebookId, "N.F.") {
-			err = reporting.UpdateShareIndex(config_obj, notebook)
+			err = notebook_manager.UpdateShareIndex(notebook)
 			if err != nil {
 				return err
 			}
@@ -111,11 +153,6 @@ func (self *SanityChecks) Check(
 	}
 
 	err = maybeMigrateClientIndex(ctx, config_obj)
-	if err != nil {
-		return err
-	}
-
-	err = maybeStartInitialArtifacts(ctx, config_obj)
 	if err != nil {
 		return err
 	}
@@ -199,7 +236,7 @@ func checkForServerUpgrade(
 
 		// Go through all the artifacts and update their tool
 		// definitions.
-		manager, err := services.GetRepositoryManager()
+		manager, err := services.GetRepositoryManager(config_obj)
 		if err != nil {
 			return err
 		}
@@ -209,12 +246,20 @@ func checkForServerUpgrade(
 			return err
 		}
 
-		inventory := services.GetInventory()
+		inventory, err := services.GetInventory(config_obj)
+		if err != nil {
+			return err
+		}
 
 		seen := make(map[string]bool)
 
-		for _, name := range repository.List() {
-			artifact, pres := repository.Get(config_obj, name)
+		names, err := repository.List(ctx, config_obj)
+		if err != nil {
+			return err
+		}
+
+		for _, name := range names {
+			artifact, pres := repository.Get(ctx, config_obj, name)
 			if !pres {
 				continue
 			}
@@ -226,17 +271,20 @@ func checkForServerUpgrade(
 					continue
 				}
 
-				_, pres := seen[tool_definition.Name]
+				key := tool_definition.Name
+				if tool_definition.Version != "" {
+					key = tool_definition.Name + ":" + tool_definition.Version
+				}
+				_, pres := seen[key]
 				if !pres {
-					seen[tool_definition.Name] = true
+					seen[key] = true
 
-					// If the existing tool
-					// definition was overridden
-					// by the admin do not alter
-					// it.
-					tool, err := inventory.ProbeToolInfo(tool_definition.Name)
+					// If the existing tool definition was overridden
+					// by the admin do not alter it.
+					tool, err := inventory.ProbeToolInfo(
+						ctx, config_obj, tool_definition.Name, tool_definition.Version)
 					if err == nil && tool.AdminOverride {
-						logger.Info("<red>Skipping update</> of tool <green>%v</> because an admin manually overrode its definition.",
+						logger.Info("<yellow>Skipping update</> of tool <green>%v</> because an admin manually overrode its definition.",
 							tool_definition.Name)
 						continue
 					}
@@ -244,20 +292,20 @@ func checkForServerUpgrade(
 					// Log that the tool is upgraded.
 					logger.WithFields(logrus.Fields{
 						"Tool": tool_definition,
-					}).Info("Upgrading tool <red>" + tool_definition.Name)
+					}).Info("Upgrading tool <green>" + key)
 
 					tool_definition = proto.Clone(
 						tool_definition).(*artifacts_proto.Tool)
 
-					// Re-add the tool to force
-					// hashes to be taken when the
-					// tool is used next.
+					// Re-add the tool to force hashes to be taken
+					// when the tool is used next.
 					tool_definition.Hash = ""
 
-					err = inventory.AddTool(
+					err = inventory.AddTool(ctx,
 						config_obj, tool_definition,
 						services.ToolOptions{
-							Upgrade: true,
+							Upgrade:            true,
+							ArtifactDefinition: true,
 						})
 					if err != nil {
 						// Errors are not fatal during upgrade.
@@ -271,7 +319,7 @@ func checkForServerUpgrade(
 	return nil
 }
 
-func StartSanityCheckService(
+func NewSanityCheckService(
 	ctx context.Context,
 	wg *sync.WaitGroup,
 	config_obj *config_proto.Config) error {

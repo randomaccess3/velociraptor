@@ -32,8 +32,8 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/pkg/errors"
-	file_store_accessor "www.velocidex.com/golang/velociraptor/accessors/file_store"
+	"github.com/go-errors/errors"
+	"www.velocidex.com/golang/velociraptor/accessors/file_store_file_info"
 	config_proto "www.velocidex.com/golang/velociraptor/config/proto"
 	"www.velocidex.com/golang/velociraptor/file_store/api"
 	logging "www.velocidex.com/golang/velociraptor/logging"
@@ -53,6 +53,16 @@ type DirectoryFileWriter struct {
 
 func (self *DirectoryFileWriter) Size() (int64, error) {
 	return self.Fd.Seek(0, os.SEEK_END)
+}
+
+func (self *DirectoryFileWriter) Update(data []byte, offset int64) error {
+	_, err := self.Fd.Seek(offset, os.SEEK_SET)
+	if err != nil {
+		return err
+	}
+
+	_, err = self.Fd.Write(data)
+	return err
 }
 
 func (self *DirectoryFileWriter) Write(data []byte) (int, error) {
@@ -126,9 +136,9 @@ func (self *DirectoryFileStore) ListDirectory(dirname api.FSPathSpec) (
 		}
 
 		name_type, name := api.GetFileStorePathTypeFromExtension(name)
-		result = append(result, file_store_accessor.NewFileStoreFileInfo(
+		result = append(result, file_store_file_info.NewFileStoreFileInfo(
 			self.config_obj,
-			dirname.AddChild(
+			dirname.AddUnsafeChild(
 				utils.UnsanitizeComponent(name)).
 				SetType(name_type),
 			fileinfo))
@@ -145,7 +155,7 @@ func (self *DirectoryFileStore) ReadFile(
 
 	file, err := os.Open(file_path)
 	if err != nil {
-		return nil, errors.WithStack(err)
+		return nil, errors.Wrap(err, 0)
 	}
 	return &api.FileAdapter{
 		File:      file,
@@ -164,17 +174,13 @@ func (self *DirectoryFileStore) StatFile(
 		return nil, err
 	}
 
-	return &file_store_accessor.FileStoreFileInfo{
+	return &file_store_file_info.FileStoreFileInfo{
 		FileInfo: file,
 	}, nil
 }
 
 func (self *DirectoryFileStore) WriteFile(
 	filename api.FSPathSpec) (api.FileWriter, error) {
-	if strings.Contains(filename.AsClientPath(), "Generic.Client.Stats") {
-		utils.DlvBreak()
-	}
-
 	return self.WriteFileWithCompletion(filename, nil)
 }
 
@@ -196,7 +202,7 @@ func (self *DirectoryFileStore) WriteFileWithCompletion(
 		logger := logging.GetLogger(self.config_obj, &logging.FrontendComponent)
 		logger.Error("Unable to open file %v: %v", file_path, err)
 
-		return nil, errors.WithStack(err)
+		return nil, errors.Wrap(err, 0)
 	}
 
 	return &DirectoryFileWriter{

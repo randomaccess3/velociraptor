@@ -1,6 +1,6 @@
 /*
-   Velociraptor - Hunting Evil
-   Copyright (C) 2019 Velocidex Innovations.
+   Velociraptor - Dig Deeper
+   Copyright (C) 2019-2022 Rapid7 Inc.
 
    This program is free software: you can redistribute it and/or modify
    it under the terms of the GNU Affero General Public License as published
@@ -27,18 +27,20 @@ import (
 	"www.velocidex.com/golang/velociraptor/accessors"
 	"www.velocidex.com/golang/velociraptor/acls"
 	"www.velocidex.com/golang/velociraptor/file_store/csv"
+	"www.velocidex.com/golang/velociraptor/json"
+	"www.velocidex.com/golang/velociraptor/vql"
 	vql_subsystem "www.velocidex.com/golang/velociraptor/vql"
 	vfilter "www.velocidex.com/golang/vfilter"
 	"www.velocidex.com/golang/vfilter/arg_parser"
 )
 
 type ParseCSVPluginArgs struct {
-	Filenames   []string `vfilter:"required,field=filename,doc=CSV files to open"`
-	Accessor    string   `vfilter:"optional,field=accessor,doc=The accessor to use"`
-	AutoHeaders bool     `vfilter:"optional,field=auto_headers,doc=If unset the first row is headers"`
-	Separator   string   `vfilter:"optional,field=separator,doc=Comma separator (default ',')"`
-	Comment     string   `vfilter:"optional,field=comment,doc=The single character that should be considered a comment"`
-	Columns     []string `vfilter:"optional,field=columns,doc=The columns to use"`
+	Filenames   []*accessors.OSPath `vfilter:"required,field=filename,doc=CSV files to open"`
+	Accessor    string              `vfilter:"optional,field=accessor,doc=The accessor to use"`
+	AutoHeaders bool                `vfilter:"optional,field=auto_headers,doc=If unset the first row is headers"`
+	Separator   string              `vfilter:"optional,field=separator,doc=Comma separator (default ',')"`
+	Comment     string              `vfilter:"optional,field=comment,doc=The single character that should be considered a comment"`
+	Columns     []string            `vfilter:"optional,field=columns,doc=The columns to use"`
 }
 
 type ParseCSVPlugin struct{}
@@ -72,7 +74,7 @@ func (self ParseCSVPlugin) Call(
 					scope.Log("parse_csv: %v", err)
 					return
 				}
-				fd, err := accessor.Open(filename)
+				fd, err := accessor.OpenWithOSPath(filename)
 				if err != nil {
 					scope.Log("Unable to open file %s: %v",
 						filename, err)
@@ -156,9 +158,10 @@ func (self ParseCSVPlugin) Call(
 
 func (self ParseCSVPlugin) Info(scope vfilter.Scope, type_map *vfilter.TypeMap) *vfilter.PluginInfo {
 	return &vfilter.PluginInfo{
-		Name:    "parse_csv",
-		Doc:     "Parses events from a CSV file.",
-		ArgType: type_map.AddType(scope, &ParseCSVPluginArgs{}),
+		Name:     "parse_csv",
+		Doc:      "Parses events from a CSV file.",
+		ArgType:  type_map.AddType(scope, &ParseCSVPluginArgs{}),
+		Metadata: vql.VQLMetadata().Permissions(acls.FILESYSTEM_READ).Build(),
 	}
 }
 
@@ -215,7 +218,8 @@ func (self _WatchCSVPlugin) Info(scope vfilter.Scope, type_map *vfilter.TypeMap)
 		Name: "watch_csv",
 		Doc: "Watch a CSV file and stream events from it. " +
 			"Note: This is an event plugin which does not complete.",
-		ArgType: type_map.AddType(scope, &ParseCSVPluginArgs{}),
+		ArgType:  type_map.AddType(scope, &ParseCSVPluginArgs{}),
+		Metadata: vql.VQLMetadata().Permissions(acls.FILESYSTEM_READ).Build(),
 	}
 }
 
@@ -246,7 +250,7 @@ func (self WriteCSVPlugin) Call(
 		var writer *csv.CSVWriter
 
 		switch arg.Accessor {
-		case "", "file":
+		case "", "auto", "file":
 			err := vql_subsystem.CheckAccess(scope, acls.FILESYSTEM_WRITE)
 			if err != nil {
 				scope.Log("write_csv: %s", err)
@@ -263,7 +267,8 @@ func (self WriteCSVPlugin) Call(
 			defer file.Close()
 
 			config_obj, _ := vql_subsystem.GetServerConfig(scope)
-			writer = csv.GetCSVAppender(config_obj, scope, file, true)
+			writer = csv.GetCSVAppender(
+				config_obj, scope, file, true, json.DefaultEncOpts())
 			defer writer.Close()
 
 		default:
@@ -287,9 +292,10 @@ func (self WriteCSVPlugin) Call(
 
 func (self WriteCSVPlugin) Info(scope vfilter.Scope, type_map *vfilter.TypeMap) *vfilter.PluginInfo {
 	return &vfilter.PluginInfo{
-		Name:    "write_csv",
-		Doc:     "Write a query into a CSV file.",
-		ArgType: type_map.AddType(scope, &WriteCSVPluginArgs{}),
+		Name:     "write_csv",
+		Doc:      "Write a query into a CSV file.",
+		ArgType:  type_map.AddType(scope, &WriteCSVPluginArgs{}),
+		Metadata: vql.VQLMetadata().Permissions(acls.FILESYSTEM_WRITE).Build(),
 	}
 }
 

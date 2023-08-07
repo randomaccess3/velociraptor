@@ -12,9 +12,12 @@ import (
 	"github.com/Velocidex/yaml/v2"
 	actions_proto "www.velocidex.com/golang/velociraptor/actions/proto"
 	config_proto "www.velocidex.com/golang/velociraptor/config/proto"
+	logging "www.velocidex.com/golang/velociraptor/logging"
 	"www.velocidex.com/golang/velociraptor/services"
+	"www.velocidex.com/golang/velociraptor/startup"
 	"www.velocidex.com/golang/velociraptor/utils"
 	vql_subsystem "www.velocidex.com/golang/velociraptor/vql"
+	"www.velocidex.com/golang/velociraptor/vql/acl_managers"
 	"www.velocidex.com/golang/vfilter"
 )
 
@@ -31,6 +34,10 @@ var (
 
 	deaddisk_command_add_windows_disk = deaddisk_command.Flag(
 		"add_windows_disk", "Add a Windows Hard Disk Image").String()
+
+	deaddisk_command_add_windows_disk_offset = deaddisk_command.Flag(
+		"offset", "The offset of the partition inside the disk").
+		Default("-1").Int64()
 
 	deaddisk_command_add_windows_directory = deaddisk_command.Flag(
 		"add_windows_directory", "Add a Windows mounted directory").String()
@@ -51,11 +58,11 @@ func addWindowsDirectory(
 
 	builder := services.ScopeBuilder{
 		Config:     config_obj,
-		ACLManager: vql_subsystem.NullACLManager{},
-		Logger:     log.New(os.Stderr, "velociraptor: ", 0),
+		ACLManager: acl_managers.NullACLManager{},
+		Logger:     log.New(&LogWriter{config_obj}, "", 0),
 	}
 
-	manager, err := services.GetRepositoryManager()
+	manager, err := services.GetRepositoryManager(config_obj)
 	if err != nil {
 		return err
 	}
@@ -154,45 +161,45 @@ func addWindowsDirectory(
 	return nil
 }
 
-func addWindowsHardDisk(image string, config_obj *config_proto.Config) error {
+func addWindowsHardDisk(
+	image string, config_obj *config_proto.Config) error {
+
 	builder := services.ScopeBuilder{
 		Config:     config_obj,
-		ACLManager: vql_subsystem.NullACLManager{},
-		Logger:     log.New(os.Stderr, "velociraptor: ", 0),
+		ACLManager: acl_managers.NullACLManager{},
+		Logger:     log.New(&LogWriter{config_obj}, "", 0),
 		Env: ordereddict.NewDict().
 			Set(vql_subsystem.ACL_MANAGER_VAR,
-				vql_subsystem.NewRoleACLManager("administrator")).
+				acl_managers.NewRoleACLManager(config_obj, "administrator")).
 			Set("ImagePath", image),
 	}
 
-	manager, err := services.GetRepositoryManager()
+	manager, err := services.GetRepositoryManager(config_obj)
 	if err != nil {
 		return err
 	}
 	scope := manager.BuildScope(builder)
 	defer scope.Close()
 
-	scope.Log("Enumerating partitions using Windows.Forensics.PartitionTable")
-	query := `
-SELECT *
-FROM Artifact.Windows.Forensics.PartitionTable(ImagePath=ImagePath)
-`
-	vqls, err := vfilter.MultiParse(query)
-	if err != nil {
-		return fmt.Errorf("Unable to parse VQL Query: %w", err)
-	}
+	if *deaddisk_command_add_windows_disk_offset < 0 {
+		rows, err := getPartitionOffsets(scope, image, config_obj)
+		if err != nil {
+			return err
+		}
 
-	ctx, cancel := InstallSignalHandler(nil, scope)
-	defer cancel()
-
-	for _, vql := range vqls {
-		for row := range vql.Eval(ctx, scope) {
+		for _, row := range rows {
 			// Here we are looking for a partition with a Windows
 			// directory
 			if checkForName(scope, row, "TopLevelDirectory", "Windows") {
-				addWindowsPartition(config_obj, scope, image, row)
+				partition_start := vql_subsystem.GetIntFromRow(scope, row, "StartOffset")
+				addWindowsPartition(config_obj, scope, image, partition_start)
 			}
 		}
+
+	} else {
+		addWindowsPartition(
+			config_obj, scope, image,
+			uint64(*deaddisk_command_add_windows_disk_offset))
 	}
 
 	addCommonShadowAccessors(config_obj)
@@ -200,32 +207,73 @@ FROM Artifact.Windows.Forensics.PartitionTable(ImagePath=ImagePath)
 	return nil
 }
 
+func getPartitionOffsets(
+	scope vfilter.Scope,
+	image string,
+	config_obj *config_proto.Config) ([]*ordereddict.Dict, error) {
+	scope.Log("Enumerating partitions using Windows.Forensics.PartitionTable")
+	query := `
+SELECT *
+FROM Artifact.Windows.Forensics.PartitionTable(ImagePath=ImagePath)
+`
+	vqls, err := vfilter.MultiParse(query)
+	if err != nil {
+		return nil, fmt.Errorf("Unable to parse VQL Query: %w", err)
+	}
+
+	ctx, cancel := InstallSignalHandler(nil, scope)
+	defer cancel()
+
+	results := []*ordereddict.Dict{}
+	for _, vql := range vqls {
+		for row := range vql.Eval(ctx, scope) {
+			results = append(results, vfilter.RowToDict(ctx, scope, row))
+		}
+	}
+	return results, nil
+}
+
 func doDeadDisk() error {
+	logging.DisableLogging()
+
 	full_config_obj, err := APIConfigLoader.WithNullLoader().LoadAndValidate()
 	if err != nil {
 		return fmt.Errorf("Unable to load config file: %w", err)
 	}
 
-	sm, err := startEssentialServices(full_config_obj)
-	if err != nil {
-		return fmt.Errorf("Starting services: %w", err)
-	}
+	ctx, cancel := install_sig_handler()
+	defer cancel()
+
+	sm, err := startup.StartToolServices(ctx, full_config_obj)
 	defer sm.Close()
+
+	if err != nil {
+		return err
+	}
 
 	config_obj := &config_proto.Config{
 		Remappings: full_config_obj.Remappings,
 	}
 
 	if *deaddisk_command_add_windows_disk != "" {
-		err = addWindowsHardDisk(*deaddisk_command_add_windows_disk, config_obj)
+		abs_path, err := filepath.Abs(*deaddisk_command_add_windows_disk)
+		if err != nil {
+			return err
+		}
+
+		err = addWindowsHardDisk(abs_path, config_obj)
 		if err != nil {
 			return err
 		}
 	}
 
 	if *deaddisk_command_add_windows_directory != "" {
-		err = addWindowsDirectory(
-			*deaddisk_command_add_windows_directory, config_obj)
+		abs_path, err := filepath.Abs(*deaddisk_command_add_windows_directory)
+		if err != nil {
+			return err
+		}
+
+		err = addWindowsDirectory(abs_path, config_obj)
 		if err != nil {
 			return err
 		}
@@ -378,10 +426,8 @@ func addWindowsPartition(
 	config_obj *config_proto.Config,
 	scope vfilter.Scope,
 	image string,
-	row vfilter.Row) {
+	partition_start uint64) {
 	addCommonPermissions(config_obj)
-
-	partition_start := vql_subsystem.GetIntFromRow(scope, row, "StartOffset")
 
 	scope.Log("Adding windows partition at offset %v", partition_start)
 

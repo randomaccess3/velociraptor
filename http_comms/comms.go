@@ -1,32 +1,29 @@
 /*
-   Velociraptor - Hunting Evil
-   Copyright (C) 2019 Velocidex Innovations.
+Velociraptor - Dig Deeper
+Copyright (C) 2019-2022 Rapid7 Inc.
 
-   This program is free software: you can redistribute it and/or modify
-   it under the terms of the GNU Affero General Public License as published
-   by the Free Software Foundation, either version 3 of the License, or
-   (at your option) any later version.
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU Affero General Public License as published
+by the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
 
-   This program is distributed in the hope that it will be useful,
-   but WITHOUT ANY WARRANTY; without even the implied warranty of
-   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-   GNU Affero General Public License for more details.
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU Affero General Public License for more details.
 
-   You should have received a copy of the GNU Affero General Public License
-   along with this program.  If not, see <https://www.gnu.org/licenses/>.
+You should have received a copy of the GNU Affero General Public License
+along with this program.  If not, see <https://www.gnu.org/licenses/>.
 */
 package http_comms
 
 import (
 	"bytes"
 	"context"
-	"crypto/tls"
-	"crypto/x509"
 	"fmt"
 	"io"
 	"io/ioutil"
 	"math/rand"
-	"net"
 	"net/http"
 	"net/http/httptrace"
 	"net/url"
@@ -35,18 +32,20 @@ import (
 	"sync/atomic"
 	"time"
 
-	errors "github.com/pkg/errors"
+	"github.com/go-errors/errors"
 	"github.com/sirupsen/logrus"
+	"golang.org/x/time/rate"
 	"google.golang.org/protobuf/proto"
-	"www.velocidex.com/golang/velociraptor/actions"
 	actions_proto "www.velocidex.com/golang/velociraptor/actions/proto"
 	config_proto "www.velocidex.com/golang/velociraptor/config/proto"
 	"www.velocidex.com/golang/velociraptor/constants"
 	"www.velocidex.com/golang/velociraptor/crypto"
 	crypto_proto "www.velocidex.com/golang/velociraptor/crypto/proto"
 	"www.velocidex.com/golang/velociraptor/executor"
+	"www.velocidex.com/golang/velociraptor/json"
 	"www.velocidex.com/golang/velociraptor/logging"
 	"www.velocidex.com/golang/velociraptor/utils"
+	"www.velocidex.com/golang/velociraptor/vql/networking"
 )
 
 var (
@@ -80,10 +79,12 @@ type Enroller struct {
 // makes sense to delay this. Velociraptor's enrollments are very
 // cheap so perhaps we dont need to worry about it here?
 func (self *Enroller) MaybeEnrol() {
+	next_enrollment := self.last_enrollment_time.Add(1 * time.Minute)
+	now := self.clock.Now()
+
 	// Only send an enrolment request at most every minute so as
 	// not to overwhelm the server if it can not keep up.
-	if self.clock.Now().After(
-		self.last_enrollment_time.Add(1 * time.Minute)) {
+	if now.After(next_enrollment) {
 		csr_pem, err := self.manager.GetCSR()
 		if err != nil {
 			return
@@ -102,6 +103,9 @@ func (self *Enroller) MaybeEnrol() {
 			// immediately and not queued client side.
 			Urgent: true,
 		})
+	} else {
+		self.logger.Debug("Waiting for enrollment for %v",
+			now.Sub(next_enrollment))
 	}
 }
 
@@ -170,20 +174,11 @@ func NewHTTPConnector(
 		maxPollDev = 30
 	}
 
-	CA_Pool := x509.NewCertPool()
-	err := crypto.AddDefaultCerts(config_obj.Client, CA_Pool)
+	transport, err := networking.GetHttpTransport(config_obj.Client, "")
 	if err != nil {
 		return nil, err
 	}
 
-	tls_config := &tls.Config{
-		MinVersion:         tls.VersionTLS12,
-		ClientSessionCache: tls.NewLRUClientSessionCache(100),
-		RootCAs:            CA_Pool,
-	}
-
-	// For self signed certificates we must ignore the server name
-	// and only trust certs issued by our server.
 	if config_obj.Client.UseSelfSignedSsl {
 		logger.Info("Expecting self signed certificate for server.")
 
@@ -192,16 +187,10 @@ func NewHTTPConnector(
 		// server. This setting also allows the server to be accessed
 		// by e.g. localhost despite the certificate being issued to
 		// VelociraptorServer.
-		tls_config.ServerName = config_obj.Client.PinnedServerName
+		transport.TLSClientConfig.ServerName = config_obj.Client.PinnedServerName
 	} else {
-
 		// Not self signed - add the public roots for verifications.
-		crypto.AddPublicRoots(tls_config.RootCAs)
-	}
-
-	timeout := config_obj.Client.ConnectionTimeout
-	if timeout == 0 {
-		timeout = 300 // 5 Min default
+		crypto.AddPublicRoots(transport.TLSClientConfig.RootCAs)
 	}
 
 	self := &HTTPConnector{
@@ -226,20 +215,7 @@ func NewHTTPConnector(
 			CheckRedirect: func(req *http.Request, via []*http.Request) error {
 				return http.ErrUseLastResponse
 			},
-			Transport: &http.Transport{
-				DialContext: (&net.Dialer{
-					Timeout:   time.Duration(timeout) * time.Second,
-					KeepAlive: time.Duration(timeout) * time.Second,
-					DualStack: true,
-				}).DialContext,
-				Proxy:                 proxyHandler,
-				MaxIdleConns:          100,
-				IdleConnTimeout:       time.Duration(timeout) * time.Second,
-				TLSHandshakeTimeout:   time.Duration(timeout) * time.Second,
-				ExpectContinueTimeout: time.Duration(timeout) * time.Second,
-				ResponseHeaderTimeout: time.Duration(timeout) * time.Second,
-				TLSClientConfig:       tls_config,
-			},
+			Transport: transport,
 		},
 	}
 
@@ -270,7 +246,7 @@ func (self *HTTPConnector) Post(
 		self.logger.Info("Post to %v returned %v - advancing to next server\n",
 			self.GetCurrentUrl(handler), err)
 		self.advanceToNextServer(ctx)
-		return nil, errors.WithStack(err)
+		return nil, errors.Wrap(err, 0)
 	}
 
 	trace := &httptrace.ClientTrace{
@@ -291,20 +267,23 @@ func (self *HTTPConnector) Post(
 		req.Header.Set("X-Priority", "urgent")
 	}
 
+	now := utils.GetTime().Now()
 	resp, err := self.client.Do(req)
+	if resp != nil {
+		defer resp.Body.Close()
+	}
+
 	if err != nil && err != io.EOF {
 		self.logger.Info("Post to %v returned %v - advancing to next server\n",
 			self.GetCurrentUrl(handler), err)
 
 		// POST error - rotate to next URL
 		self.advanceToNextServer(ctx)
-		return nil, errors.WithStack(err)
+		return nil, errors.Wrap(err, 0)
 	}
-	// Must make sure to close the body or we leak sockets.
-	defer resp.Body.Close()
 
-	self.logger.Info("%s: sent %d bytes, response with status: %v",
-		name, len(data), resp.Status)
+	self.logger.Info("%s: sent %d bytes, response with status: %v after %v, waiting for server messages",
+		name, len(data), resp.Status, utils.GetTime().Now().Sub(now))
 
 	// Handle redirect. Frontends may redirect us to other
 	// frontends.
@@ -376,10 +355,11 @@ func (self *HTTPConnector) Post(
 		// ioutil.ReadAll()
 		n, err := utils.Copy(ctx, encrypted, resp.Body)
 		if err != nil {
-			return nil, errors.WithStack(err)
+			return nil, errors.Wrap(err, 0)
 		}
 
-		self.logger.Info("%s: received %d bytes", name, n)
+		self.logger.Info("%s: received %d bytes in %v",
+			name, n, utils.GetTime().Now().Sub(now))
 
 		// Remember the last successful index.
 		self.mu.Lock()
@@ -406,7 +386,6 @@ func (self *HTTPConnector) Post(
 // wait once per loop.
 func (self *HTTPConnector) advanceToNextServer(ctx context.Context) {
 	self.mu.Lock()
-	defer self.mu.Unlock()
 
 	// Advance the current URL to the next one in
 	// line. Reset the server name (will be fetched from
@@ -425,6 +404,16 @@ func (self *HTTPConnector) advanceToNextServer(ctx context.Context) {
 		self.logger.Info(
 			"Waiting for a reachable server: %v", wait)
 
+		// While we wait to reconnect we need to update the nanny or
+		// we get killed.
+		if executor.Nanny != nil {
+			executor.Nanny.UpdatePumpRbToServer()
+			executor.Nanny.UpdateReadFromServer()
+		}
+
+		// Release the lock while we wait.
+		self.mu.Unlock()
+
 		// Add random wait between polls to avoid
 		// synchronization of endpoints.
 		select {
@@ -432,6 +421,9 @@ func (self *HTTPConnector) advanceToNextServer(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		}
+
+	} else {
+		self.mu.Unlock()
 	}
 }
 
@@ -486,12 +478,16 @@ func (self *HTTPConnector) rekeyNextServer(ctx context.Context) error {
 
 	req, err := http.NewRequest("GET", url+"server.pem", nil)
 	if err != nil {
-		return errors.WithStack(err)
+		return errors.Wrap(err, 0)
 	}
 	req.Header.Set("User-Agent", constants.USER_AGENT)
 	req.Header.Set("Content-Type", "application/binary")
 
 	resp, err := self.client.Do(req)
+	if resp != nil {
+		defer resp.Body.Close()
+	}
+
 	if err != nil {
 		self.logger.Info("While getting %v: %v", url, err)
 		if strings.Contains(err.Error(), "cannot validate certificate") {
@@ -504,21 +500,23 @@ func (self *HTTPConnector) rekeyNextServer(ctx context.Context) error {
 		self.server_name = ""
 		return err
 	}
-	defer resp.Body.Close()
 
 	if resp.StatusCode != 200 {
-		return errors.New("Invalid status while downloading PEM")
+		err = errors.New("Invalid status while downloading PEM")
+		self.logger.Info("While getting %v: %v (%d)", url, err, resp.StatusCode)
+		return err
 	}
 
 	pem, err := ioutil.ReadAll(io.LimitReader(resp.Body, constants.MAX_MEMORY))
 	if err != nil {
 		self.server_name = ""
-		return errors.WithStack(err)
+		self.logger.Info("While reading %v: %v", url, err)
+		return errors.Wrap(err, 0)
 	}
 
 	// This will replace the current server_name certificate in
 	// the manager.
-	server_name, err := self.manager.AddCertificate(pem)
+	server_name, err := self.manager.AddCertificate(self.config_obj, pem)
 	if err != nil {
 		self.logger.Error("AddCertificate: %v", err)
 		self.server_name = ""
@@ -546,13 +544,19 @@ type NotificationReader struct {
 	manager    crypto.ICryptoManager
 	executor   executor.Executor
 	enroller   *Enroller
-	handler    string
-	logger     *logging.LogContext
-	name       string
+
+	// The url of the handler on the server (see server/comms.go)
+	// Currently this is "control" for the Sender and "reader" for the
+	// NotificationReader.
+	handler string
+	logger  *logging.LogContext
+	name    string
 
 	minPoll, maxPoll      time.Duration
 	maxPollDev            uint64
 	current_poll_duration time.Duration
+
+	limiter *rate.Limiter
 
 	// Pause the PumpRingBufferToSendMessage loop - stops transmitting
 	// data to the server temporarily. New data will still be queued
@@ -566,6 +570,14 @@ type NotificationReader struct {
 	on_exit func()
 
 	clock utils.Clock
+
+	// Send the server Server.Internal.ClientInfo messages
+	// periodically. This is sent outside the executor queues to avoid
+	// having the message accumulate in the ring buffer file, but it
+	// looks just like a regular montoring event query result.
+	mu                 sync.Mutex
+	last_update_time   time.Time
+	last_update_period time.Duration
 }
 
 func NewNotificationReader(
@@ -576,6 +588,7 @@ func NewNotificationReader(
 	enroller *Enroller,
 	logger *logging.LogContext,
 	name string,
+	limiter *rate.Limiter,
 	handler string,
 	on_exit func(),
 	clock utils.Clock) *NotificationReader {
@@ -583,6 +596,21 @@ func NewNotificationReader(
 	maxPollDev := config_obj.Client.MaxPollStd
 	if maxPollDev == 0 {
 		maxPollDev = 30
+	}
+
+	minPoll := config_obj.Client.MinPoll
+	if minPoll == 0 {
+		minPoll = 1
+	}
+
+	last_update_period := 86400 * time.Second
+	if config_obj.Client.ClientInfoUpdateTime > 0 {
+		last_update_period = time.Duration(
+			config_obj.Client.ClientInfoUpdateTime) * time.Second
+
+		// Set to a negative number to disable Server.Internal.ClientInfo
+	} else if config_obj.Client.ClientInfoUpdateTime == -1 {
+		last_update_period = 0
 	}
 
 	return &NotificationReader{
@@ -594,12 +622,14 @@ func NewNotificationReader(
 		name:                  name,
 		handler:               handler,
 		logger:                logger,
-		minPoll:               time.Duration(1) * time.Second,
+		minPoll:               time.Duration(minPoll) * time.Second,
 		maxPoll:               time.Duration(config_obj.Client.MaxPoll) * time.Second,
 		maxPollDev:            maxPollDev,
+		limiter:               limiter,
 		current_poll_duration: time.Second,
 		on_exit:               on_exit,
 		clock:                 clock,
+		last_update_period:    last_update_period,
 	}
 }
 
@@ -607,11 +637,12 @@ func NewNotificationReader(
 // the server.
 func (self *NotificationReader) sendMessageList(
 	ctx context.Context, message_list [][]byte,
-	urgent bool) {
+	urgent bool,
+	compression crypto_proto.PackedMessageList_CompressionType) {
 
 	for {
 		if atomic.LoadInt32(&self.IsPaused) == 0 {
-			err := self.sendToURL(ctx, message_list, urgent)
+			err := self.sendToURL(ctx, message_list, urgent, compression)
 			// Success!
 			if err == nil {
 				return
@@ -620,7 +651,7 @@ func (self *NotificationReader) sendMessageList(
 			// If we are being redirected do not wait -
 			// just retry again.
 
-			if errors.Cause(err) == RedirectError {
+			if errors.Is(err, RedirectError) {
 				continue
 			}
 
@@ -640,6 +671,13 @@ func (self *NotificationReader) sendMessageList(
 			GetRand()(int(self.maxPollDev)))*time.Second
 		self.logger.Info("Sleeping for %v", wait)
 
+		// While we wait to reconnect we need to update the nanny or
+		// we get killed.
+		if executor.Nanny != nil {
+			executor.Nanny.UpdatePumpRbToServer()
+			executor.Nanny.UpdateReadFromServer()
+		}
+
 		select {
 		case <-ctx.Done():
 			return
@@ -653,22 +691,32 @@ func (self *NotificationReader) sendMessageList(
 func (self *NotificationReader) sendToURL(
 	ctx context.Context,
 	message_list [][]byte,
-	urgent bool) (err error) {
+	urgent bool,
+	compression crypto_proto.PackedMessageList_CompressionType) (err error) {
 
 	if self.connector.ServerName() == "" {
 		self.connector.ReKeyNextServer(ctx)
 	}
 
-	self.logger.Info("%s: Connected to %s", self.name,
-		self.connector.GetCurrentUrl(self.handler))
 	// Clients always compress messages to the server.
 	cipher_text, err := self.manager.Encrypt(
 		message_list,
-		crypto_proto.PackedMessageList_ZCOMPRESSION,
+		compression,
+		self.config_obj.Client.Nonce,
 		self.connector.ServerName())
 	if err != nil {
 		return err
 	}
+
+	now := utils.GetTime().Now()
+	if !urgent {
+		self.limiter.Wait(ctx)
+	}
+
+	self.logger.Info(
+		"%s: Connected to %s after waiting for limiter for %v",
+		self.name, self.connector.GetCurrentUrl(self.handler),
+		utils.GetTime().Now().Sub(now))
 
 	encrypted, err := self.connector.Post(ctx, self.name,
 		self.handler, cipher_text, urgent)
@@ -691,8 +739,8 @@ func (self *NotificationReader) sendToURL(
 		return err
 	}
 
-	return message_info.IterateJobs(ctx,
-		func(ctx context.Context, msg *crypto_proto.VeloMessage) {
+	return message_info.IterateJobs(ctx, self.config_obj,
+		func(ctx context.Context, msg *crypto_proto.VeloMessage) error {
 
 			// Abort the client, but leave the client
 			// running a bit to send acks. NOTE: This has
@@ -707,6 +755,7 @@ func (self *NotificationReader) sendToURL(
 			}
 
 			self.executor.ProcessRequest(ctx, msg)
+			return nil
 		})
 }
 
@@ -717,21 +766,27 @@ func (self *NotificationReader) maybeCallOnExit() {
 }
 
 // The Receiver channel is used to receive commands from the server:
-// 1. We send an empty MessageList{} with a POST
-//    (but this allows us to authenticate to the server).
-// 2. Block on reading the body of the POST until the server completes
-//    the request.  The server will trickle feed the connection with
-//    data to keep it alive for any intermediate proxies.
-// 3. Any received messages will be processed automatically by
-//    self.sendMessageList()
-// 4. If there are errors, we back off and wait for self.maxPoll.
+//  1. We send an empty MessageList{} with a POST
+//     (but this allows us to authenticate to the server).
+//  2. Block on reading the body of the POST until the server completes
+//     the request.  The server will trickle feed the connection with
+//     data to keep it alive for any intermediate proxies.
+//  3. Any received messages will be processed automatically by
+//     self.sendMessageList()
+//  4. If there are errors, we back off and wait for self.maxPoll.
 func (self *NotificationReader) Start(
 	ctx context.Context, wg *sync.WaitGroup) {
+
+	compression := crypto_proto.PackedMessageList_ZCOMPRESSION
+	if self.config_obj.Client.DisableCompression {
+		compression = crypto_proto.PackedMessageList_UNCOMPRESSED
+	}
 
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
 		defer self.maybeCallOnExit()
+		defer utils.CheckForPanic("Panic in main loop")
 
 		// Periodically read from executor and push to ring buffer.
 		for {
@@ -743,10 +798,16 @@ func (self *NotificationReader) Start(
 			message_list := self.GetMessageList()
 			serialized_message_list, err := proto.Marshal(message_list)
 			if err == nil {
-				compressed, err := utils.Compress(serialized_message_list)
-				if err == nil {
+				if compression == crypto_proto.PackedMessageList_ZCOMPRESSION {
+					compressed, err := utils.Compress(serialized_message_list)
+					if err == nil {
+						self.sendMessageList(
+							ctx, [][]byte{compressed}, !URGENT, compression)
+					}
+
+				} else {
 					self.sendMessageList(
-						ctx, [][]byte{compressed}, false)
+						ctx, [][]byte{serialized_message_list}, !URGENT, compression)
 				}
 			}
 
@@ -767,14 +828,45 @@ func (self *NotificationReader) Start(
 // server's last hunt timestamp). It is therefore ok to send a foreman
 // message in every reader message to improve hunt latency.
 func (self *NotificationReader) GetMessageList() *crypto_proto.MessageList {
-	return &crypto_proto.MessageList{
+	self.mu.Lock()
+	defer self.mu.Unlock()
+
+	// Send this every message
+	result := &crypto_proto.MessageList{
 		Job: []*crypto_proto.VeloMessage{{
 			SessionId: constants.FOREMAN_WELL_KNOWN_FLOW,
 			ForemanCheckin: &actions_proto.ForemanCheckin{
-				LastEventTableVersion: actions.GlobalEventTableVersion(),
-			}},
-		},
+				LastEventTableVersion: self.executor.EventManager().Version(),
+			},
+		}}}
+
+	// Attach the Server.Internal.ClientInfo message very
+	// infrequently.
+	now := utils.GetTime().Now()
+	if now.Add(-self.last_update_period).After(self.last_update_time) {
+		self.last_update_time = now
+
+		client_info := self.executor.GetClientInfo()
+		client_info_data, err := json.Marshal(client_info)
+		if err == nil {
+			logger := logging.GetLogger(self.config_obj, &logging.ClientComponent)
+			logger.Debug("Sending client info update %v", client_info)
+
+			client_info_data = append(client_info_data, '\n')
+			result.Job = append(result.Job, &crypto_proto.VeloMessage{
+				SessionId: "F.Monitoring",
+				VQLResponse: &actions_proto.VQLResponse{
+					JSONLResponse: string(client_info_data),
+					Query: &actions_proto.VQLRequest{
+						Name: "Server.Internal.ClientInfo",
+					},
+					TotalRows: 1,
+				},
+			})
+		}
 	}
+
+	return result
 }
 
 type HTTPCommunicator struct {
@@ -793,6 +885,8 @@ type HTTPCommunicator struct {
 
 	// Will be called when we exit the communicator.
 	on_exit func()
+
+	Manager crypto.ICryptoManager
 }
 
 func (self *HTTPCommunicator) SetPause(is_paused bool) {
@@ -808,7 +902,6 @@ func (self *HTTPCommunicator) SetPause(is_paused bool) {
 func (self *HTTPCommunicator) Run(
 	ctx context.Context, wg *sync.WaitGroup) {
 	self.logger.Info("Starting HTTPCommunicator: %v", self.receiver.connector)
-	defer wg.Done()
 
 	self.receiver.Start(ctx, wg)
 	self.sender.Start(ctx, wg)
@@ -819,7 +912,7 @@ func (self *HTTPCommunicator) Run(
 func NewHTTPCommunicator(
 	ctx context.Context,
 	config_obj *config_proto.Config,
-	manager crypto.IClientCryptoManager,
+	crypto_manager crypto.IClientCryptoManager,
 	executor executor.Executor,
 	urls []string,
 	on_exit func(),
@@ -828,17 +921,17 @@ func NewHTTPCommunicator(
 	logger := logging.GetLogger(config_obj, &logging.ClientComponent)
 	enroller := &Enroller{
 		config_obj: config_obj,
-		manager:    manager,
+		manager:    crypto_manager,
 		executor:   executor,
 		logger:     logger,
 		clock:      clock,
 	}
-	connector, err := NewHTTPConnector(config_obj, manager, logger, urls, clock)
+	connector, err := NewHTTPConnector(config_obj, crypto_manager, logger, urls, clock)
 	if err != nil {
 		return nil, err
 	}
 
-	rb := NewLocalBuffer(ctx, config_obj)
+	rb := NewLocalBuffer(ctx, executor.FlowManager(), config_obj)
 
 	// Truncate the file to ensure we always start with a clean
 	// slate. This avoids a situation where the client fills up
@@ -855,28 +948,76 @@ func NewHTTPCommunicator(
 		}
 	}
 
+	// The sender sends messages to the server. We want the sender to
+	// send data as quickly as possible usually. NOTE: The sender only
+	// sends data when there is something to send so we are not too
+	// worried about spin loops.
+	poll_min := 100 * time.Millisecond
+	if config_obj.Client != nil && config_obj.Client.MinPoll > 0 {
+		poll_min = time.Second * time.Duration(config_obj.Client.MinPoll)
+	}
+
+	sender_limiter := rate.NewLimiter(
+		rate.Every(time.Duration(poll_min)), 100)
+
 	sender, err := NewSender(
-		config_obj, connector, manager, executor, rb, enroller,
-		logger, "Sender", "control", child_on_exit, clock)
+		config_obj, connector,
+		crypto_manager, executor, rb, enroller,
+		logger, "Sender", sender_limiter,
+
+		// The handler we hit on the server to send responses.
+		"control", child_on_exit, clock)
 	if err != nil {
 		return nil, err
 	}
+
+	// The receiver receives messages from the server.
+
+	// We want the receiver to not poll too frequently to avoid extra
+	// load on the server. Normally, the client stays connected to the
+	// server so it can be tasked immediately. However sometimes if
+	// the client/server connection is interrupted the client will
+	// attempt to reconnect immediately but will then back off to
+	// ensure it does not go into a reconnect loop. Since receiver
+	// connects happen all the time we are at risk of a reeive loop -
+	// where the client reconnects very frequently. This limiter
+	// avoids this condition by rate limiting the frequency of reader
+	// connections.
+	poll_max := 60 * time.Second
+	if config_obj.Client != nil && config_obj.Client.MaxPoll > 0 {
+		poll_max = time.Second * time.Duration(config_obj.Client.MaxPoll)
+	}
+
+	// In the case of a reconnect loop we do not connect more than
+	// twice every poll max but we are allowed to connect sooner at
+	// first. Note: We set the limit to half the max poll rate because
+	// the client connects at least as frequently as the max poll
+	// rate. We need to set the limit lower to allow the limiter to
+	// gain tokens during normal operation.
+	receiver_limiter := rate.NewLimiter(
+		rate.Every(time.Duration(poll_max/2)), 10)
+
+	receiver := NewNotificationReader(
+		config_obj, connector, crypto_manager, executor, enroller,
+		logger, "Receiver "+executor.ClientId(), receiver_limiter,
+
+		// The handler for receiving messages from the server.
+		"reader", child_on_exit, clock)
 
 	result := &HTTPCommunicator{
 		config_obj: config_obj,
 		logger:     logger,
 		enroller: &Enroller{
 			config_obj: config_obj,
-			manager:    manager,
+			manager:    crypto_manager,
 			executor:   executor,
 			logger:     logger,
 			clock:      clock,
 		},
-		on_exit: on_exit,
-		sender:  sender,
-		receiver: NewNotificationReader(
-			config_obj, connector, manager, executor, enroller,
-			logger, "Receiver", "reader", child_on_exit, clock),
+		on_exit:  on_exit,
+		sender:   sender,
+		receiver: receiver,
+		Manager:  crypto_manager,
 	}
 
 	return result, nil

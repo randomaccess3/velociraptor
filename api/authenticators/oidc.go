@@ -4,29 +4,37 @@ import (
 	"context"
 	"net/http"
 	"strings"
-	"time"
 
-	oidc "github.com/coreos/go-oidc"
-	jwt "github.com/golang-jwt/jwt"
+	oidc "github.com/coreos/go-oidc/v3/oidc"
 	"github.com/sirupsen/logrus"
 	"golang.org/x/oauth2"
+	utils "www.velocidex.com/golang/velociraptor/api/utils"
 	config_proto "www.velocidex.com/golang/velociraptor/config/proto"
 	"www.velocidex.com/golang/velociraptor/logging"
 )
 
 type OidcAuthenticator struct {
-	config_obj    *config_proto.Config
-	authenticator *config_proto.Authenticator
+	config_obj       *config_proto.Config
+	authenticator    *config_proto.Authenticator
+	base, public_url string
 }
 
 func (self *OidcAuthenticator) IsPasswordLess() bool {
 	return true
 }
 
+func (self *OidcAuthenticator) RequireClientCerts() bool {
+	return false
+}
+
+func (self *OidcAuthenticator) AuthRedirectTemplate() string {
+	return self.authenticator.AuthRedirectTemplate
+}
+
 func (self *OidcAuthenticator) Name() string {
 	name := self.authenticator.OidcName
 	if name == "" {
-		return "Genric OIDC Connector"
+		return "Generic OIDC Connector"
 	}
 	return name
 }
@@ -34,27 +42,25 @@ func (self *OidcAuthenticator) Name() string {
 func (self *OidcAuthenticator) LoginHandler() string {
 	name := self.authenticator.OidcName
 	if name != "" {
-		return "/auth/oidc/" + name + "/login"
+		return utils.Join(self.base, "/auth/oidc/", name, "/login")
 	}
-	return "/auth/oidc/login"
+	return utils.Join(self.base, "/auth/oidc/login")
 }
 
 func (self *OidcAuthenticator) LoginURL() string {
-	return self.config_obj.GUI.PublicUrl +
-		strings.TrimPrefix(self.LoginHandler(), "/")
+	return utils.Join(self.public_url, self.LoginHandler())
 }
 
 func (self *OidcAuthenticator) CallbackHandler() string {
 	name := self.authenticator.OidcName
 	if name != "" {
-		return "/auth/oidc/" + name + "/callback"
+		return utils.Join(self.base, "/auth/oidc/", name, "/callback")
 	}
-	return "/auth/oidc/callback"
+	return utils.Join(self.base, "/auth/oidc/callback")
 }
 
 func (self *OidcAuthenticator) CallbackURL() string {
-	return self.config_obj.GUI.PublicUrl +
-		strings.TrimPrefix(self.LoginHandler(), "/")
+	return utils.Join(self.public_url, self.LoginHandler())
 }
 
 func (self *OidcAuthenticator) AddHandlers(mux *http.ServeMux) error {
@@ -68,8 +74,10 @@ func (self *OidcAuthenticator) AddHandlers(mux *http.ServeMux) error {
 		return err
 	}
 
-	mux.Handle(self.LoginHandler(), self.oauthOidcLogin(provider))
-	mux.Handle(self.CallbackHandler(), self.oauthOidcCallback(provider))
+	mux.Handle(self.LoginHandler(),
+		IpFilter(self.config_obj, self.oauthOidcLogin(provider)))
+	mux.Handle(self.CallbackHandler(),
+		IpFilter(self.config_obj, self.oauthOidcCallback(provider)))
 	return nil
 }
 
@@ -94,7 +102,7 @@ func (self *OidcAuthenticator) getGenOauthConfig(
 
 	var scope []string
 	switch strings.ToLower(self.authenticator.Type) {
-	case "oidc":
+	case "oidc", "oidc-cognito":
 		scope = []string{oidc.ScopeOpenID, "email"}
 	}
 
@@ -116,7 +124,7 @@ func (self *OidcAuthenticator) oauthOidcLogin(
 		// Create oauthState cookie
 		oauthState, err := r.Cookie("oauthstate")
 		if err != nil {
-			oauthState = generateStateOauthCookie(w)
+			oauthState = generateStateOauthCookie(self.config_obj, w)
 		}
 
 		url := oidcOauthConfig.AuthCodeURL(oauthState.Value,
@@ -133,7 +141,8 @@ func (self *OidcAuthenticator) oauthOidcCallback(
 		if oauthState == nil || r.FormValue("state") != oauthState.Value {
 			logging.GetLogger(self.config_obj, &logging.GUIComponent).
 				Error("invalid oauth state of OIDC")
-			http.Redirect(w, r, "/", http.StatusTemporaryRedirect)
+			http.Redirect(w, r, utils.Homepage(self.config_obj),
+				http.StatusTemporaryRedirect)
 			return
 		}
 
@@ -143,42 +152,37 @@ func (self *OidcAuthenticator) oauthOidcCallback(
 		if err != nil {
 			logging.GetLogger(self.config_obj, &logging.GUIComponent).
 				Error("can not get oauthToken from OIDC provider: %v", err)
-			http.Redirect(w, r, "/", http.StatusTemporaryRedirect)
+			http.Redirect(w, r, utils.Homepage(self.config_obj),
+				http.StatusTemporaryRedirect)
 			return
 		}
-		userInfo, err := provider.UserInfo(r.Context(), oauth2.StaticTokenSource(oauthToken))
+		userInfo, err := provider.UserInfo(
+			r.Context(), oauth2.StaticTokenSource(oauthToken))
 		if err != nil {
 			logging.GetLogger(self.config_obj, &logging.GUIComponent).
-				Error("can not get UserInfo from OIDC provider")
-			http.Redirect(w, r, "/", http.StatusTemporaryRedirect)
+				Error("can not get UserInfo from OIDC provider: %v", err)
+			http.Redirect(w, r, utils.Homepage(self.config_obj),
+				http.StatusTemporaryRedirect)
 			return
 		}
 
-		token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
-			"user":    userInfo.Email,
-			"expires": float64(time.Now().AddDate(0, 0, 1).Unix()),
-		})
-
-		tokenString, err := token.SignedString(
-			[]byte(self.config_obj.Frontend.PrivateKey))
+		cookie, err := getSignedJWTTokenCookie(
+			self.config_obj, self.authenticator,
+			&Claims{
+				Username: userInfo.Email,
+			})
 		if err != nil {
 			logging.GetLogger(self.config_obj, &logging.GUIComponent).
 				WithFields(logrus.Fields{
-					"err": err,
+					"err": err.Error(),
 				}).Error("can not get a signed tokenString")
-			http.Redirect(w, r, "/", http.StatusTemporaryRedirect)
+			http.Redirect(w, r, utils.Homepage(self.config_obj),
+				http.StatusTemporaryRedirect)
 			return
 		}
 
-		cookie := &http.Cookie{
-			Name:     "VelociraptorAuth",
-			Value:    tokenString,
-			Path:     "/",
-			HttpOnly: true,
-			Secure:   true,
-			Expires:  time.Now().AddDate(0, 0, 1),
-		}
 		http.SetCookie(w, cookie)
-		http.Redirect(w, r, "/", http.StatusTemporaryRedirect)
+		http.Redirect(w, r, utils.Homepage(self.config_obj),
+			http.StatusTemporaryRedirect)
 	})
 }

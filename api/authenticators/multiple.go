@@ -4,10 +4,10 @@ import (
 	"fmt"
 	"net/http"
 
-	"github.com/sirupsen/logrus"
+	"github.com/Velocidex/ordereddict"
 	config_proto "www.velocidex.com/golang/velociraptor/config/proto"
 	"www.velocidex.com/golang/velociraptor/gui/velociraptor"
-	"www.velocidex.com/golang/velociraptor/logging"
+	"www.velocidex.com/golang/velociraptor/services"
 )
 
 type MultiAuthenticator struct {
@@ -33,20 +33,21 @@ func (self *MultiAuthenticator) AddLogoff(mux *http.ServeMux) error {
 
 func (self *MultiAuthenticator) reject_with_username(
 	w http.ResponseWriter, r *http.Request, err error, username string) {
-	logger := logging.GetLogger(self.config_obj, &logging.Audit)
 
 	// Log into the audit log.
-	logger.WithFields(logrus.Fields{
-		"user":   username,
-		"remote": r.RemoteAddr,
-		"method": r.Method,
-		"err":    err,
-	}).Error("User rejected by GUI")
+	if username != "" {
+		services.LogAudit(r.Context(),
+			self.config_obj, username, "User rejected by GUI",
+			ordereddict.NewDict().
+				Set("remote", r.RemoteAddr).
+				Set("method", r.Method).
+				Set("err", err.Error()))
+	}
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(http.StatusUnauthorized)
 
-	renderRejectionMessage(w, username, self.delegate_info)
+	renderRejectionMessage(self.config_obj, w, username, self.delegate_info)
 }
 
 func (self *MultiAuthenticator) AuthenticateUserHandler(
@@ -62,6 +63,14 @@ func (self *MultiAuthenticator) AuthenticateUserHandler(
 
 func (self *MultiAuthenticator) IsPasswordLess() bool {
 	return true
+}
+
+func (self *MultiAuthenticator) RequireClientCerts() bool {
+	return false
+}
+
+func (self *MultiAuthenticator) AuthRedirectTemplate() string {
+	return ""
 }
 
 func NewMultiAuthenticator(
@@ -100,6 +109,14 @@ func NewMultiAuthenticator(
 				})
 
 		case *OidcAuthenticator:
+			result.delegate_info = append(result.delegate_info,
+				velociraptor.AuthenticatorInfo{
+					LoginURL:       t.LoginURL(),
+					ProviderName:   t.authenticator.OidcName,
+					ProviderAvatar: t.authenticator.Avatar,
+				})
+
+		case *OidcAuthenticatorCognito:
 			result.delegate_info = append(result.delegate_info,
 				velociraptor.AuthenticatorInfo{
 					LoginURL:       t.LoginURL(),

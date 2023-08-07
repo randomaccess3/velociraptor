@@ -16,21 +16,23 @@ import (
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/net/context"
 	"www.velocidex.com/golang/velociraptor/accessors"
+	"www.velocidex.com/golang/velociraptor/acls"
 	"www.velocidex.com/golang/velociraptor/uploads"
+	"www.velocidex.com/golang/velociraptor/vql"
 	vql_subsystem "www.velocidex.com/golang/velociraptor/vql"
 	"www.velocidex.com/golang/vfilter"
 	"www.velocidex.com/golang/vfilter/arg_parser"
 )
 
 type SFTPUploadArgs struct {
-	File       string `vfilter:"required,field=file,doc=The file to upload"`
-	Name       string `vfilter:"optional,field=name,doc=The name of the file that should be stored on the server (may contain the path)"`
-	User       string `vfilter:"required,field=user,doc=The username to connect to the endpoint with"`
-	Path       string `vfilter:"optional,field=path,doc=Path on server to upload file to (will be prepended to name)"`
-	Accessor   string `vfilter:"optional,field=accessor,doc=The accessor to use"`
-	PrivateKey string `vfilter:"required,field=privatekey,doc=The private key to use"`
-	Endpoint   string `vfilter:"required,field=endpoint,doc=The Endpoint to use including port number (e.g. 192.168.1.1:22 )"`
-	HostKey    string `vfilter:"optional,field=hostkey,doc=Host key to verify. Blank to disable"`
+	File       *accessors.OSPath `vfilter:"required,field=file,doc=The file to upload"`
+	Name       string            `vfilter:"optional,field=name,doc=The name of the file that should be stored on the server (may contain the path)"`
+	User       string            `vfilter:"required,field=user,doc=The username to connect to the endpoint with"`
+	Path       string            `vfilter:"optional,field=path,doc=Path on server to upload file to (will be prepended to name)"`
+	Accessor   string            `vfilter:"optional,field=accessor,doc=The accessor to use"`
+	PrivateKey string            `vfilter:"required,field=privatekey,doc=The private key to use"`
+	Endpoint   string            `vfilter:"required,field=endpoint,doc=The Endpoint to use including port number (e.g. 192.168.1.1:22 )"`
+	HostKey    string            `vfilter:"optional,field=hostkey,doc=Host key to verify. Blank to disable"`
 }
 
 type SFTPUploadFunction struct{}
@@ -58,7 +60,7 @@ func (self *SFTPUploadFunction) Call(ctx context.Context,
 		return vfilter.Null{}
 	}
 
-	file, err := accessor.Open(arg.File)
+	file, err := accessor.OpenWithOSPath(arg.File)
 	if err != nil {
 		scope.Log("upload_SFTP: Unable to open %s: %s",
 			arg.File, err.Error())
@@ -67,10 +69,10 @@ func (self *SFTPUploadFunction) Call(ctx context.Context,
 	defer file.Close()
 
 	if arg.Name == "" {
-		arg.Name = arg.File
+		arg.Name = arg.File.String()
 	}
 
-	stat, err := accessor.Lstat(arg.File)
+	stat, err := accessor.LstatWithOSPath(arg.File)
 	if err != nil {
 		scope.Log("upload_SFTP: Unable to stat %s: %v",
 			arg.File, err)
@@ -200,6 +202,7 @@ func upload_SFTP(ctx context.Context, scope vfilter.Scope,
 		}, err
 	}
 	if _, err := file.ReadFrom(reader); err != nil {
+		scope.Log("upload_SFTP: while reading file: %v", err)
 		return &uploads.UploadResponse{
 			Error: err.Error(),
 		}, err
@@ -229,9 +232,10 @@ func upload_SFTP(ctx context.Context, scope vfilter.Scope,
 func (self SFTPUploadFunction) Info(
 	scope vfilter.Scope, type_map *vfilter.TypeMap) *vfilter.FunctionInfo {
 	return &vfilter.FunctionInfo{
-		Name:    "upload_sftp",
-		Doc:     "Upload files to SFTP.",
-		ArgType: type_map.AddType(scope, &SFTPUploadArgs{}),
+		Name:     "upload_sftp",
+		Doc:      "Upload files to SFTP.",
+		ArgType:  type_map.AddType(scope, &SFTPUploadArgs{}),
+		Metadata: vql.VQLMetadata().Permissions(acls.FILESYSTEM_READ).Build(),
 	}
 }
 

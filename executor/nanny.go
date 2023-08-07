@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"runtime"
+	"runtime/debug"
 	"sync"
 	"time"
 
@@ -57,6 +58,13 @@ func (self *NannyService) UpdateReadFromServer() {
 }
 
 func (self *NannyService) _CheckMemory(message string) bool {
+	// We need to make sure our memory footprint is as
+	// small as possible. The Velociraptor client
+	// prioritizes low memory footprint over latency. We
+	// just sent data to the server and we wont need that
+	// for a while so we can free our memory to the OS.
+	debug.FreeOSMemory()
+
 	if self.MaxMemoryHardLimit == 0 {
 		return false
 	}
@@ -66,7 +74,7 @@ func (self *NannyService) _CheckMemory(message string) bool {
 
 	if m.Alloc > self.MaxMemoryHardLimit {
 		self.Logger.Error(
-			"NannyService: <red>%v of %v bytes: current heap usage %v bytes</>",
+			"NannyService: <red>Exceeding memory limit: %v of %v bytes: current heap usage %v bytes</>",
 			message, self.MaxMemoryHardLimit, m.Alloc)
 
 		self._Exit()
@@ -85,7 +93,8 @@ func (self *NannyService) _CheckTime(t time.Time, message string) bool {
 	now := Clock.Now()
 	if t.Add(self.MaxConnectionDelay).Before(now) {
 		self.Logger.Error(
-			"NannyService: <red>Last %v too long ago %v</>", message, t)
+			"NannyService: <red>Last %v too long ago %v (now is %v MaxConnectionDelay is %v)</>",
+			message, t, now, self.MaxConnectionDelay)
 		self._Exit()
 		return true
 	}
@@ -118,7 +127,9 @@ func (self *NannyService) Start(
 		defer wg.Done()
 		defer self.Logger.Info("<red>Exiting</> nanny")
 
-		self.Logger.Info("<green>Starting</> nanny")
+		self.Logger.Info(
+			"<green>Starting</> nanny with MaxConnectionDelay %v and MaxMemoryHardLimit %v",
+			self.MaxConnectionDelay, self.MaxMemoryHardLimit)
 
 		for {
 			select {
@@ -157,13 +168,15 @@ func StartNannyService(
 		return nil
 	}
 
-	Nanny = &NannyService{
-		MaxMemoryHardLimit: config_obj.Client.MaxMemoryHardLimit,
-		MaxConnectionDelay: time.Duration(5*config_obj.Client.MaxPoll) *
-			time.Second,
-		Logger: logging.GetLogger(config_obj, &logging.ClientComponent),
-	}
+	if config_obj.Client.NannyMaxConnectionDelay > 0 {
+		Nanny = &NannyService{
+			MaxMemoryHardLimit: config_obj.Client.MaxMemoryHardLimit,
+			MaxConnectionDelay: time.Duration(
+				config_obj.Client.NannyMaxConnectionDelay) * time.Second,
+			Logger: logging.GetLogger(config_obj, &logging.ClientComponent),
+		}
 
-	Nanny.Start(ctx, wg)
+		Nanny.Start(ctx, wg)
+	}
 	return nil
 }

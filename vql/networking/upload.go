@@ -1,6 +1,6 @@
 /*
-   Velociraptor - Hunting Evil
-   Copyright (C) 2019 Velocidex Innovations.
+   Velociraptor - Dig Deeper
+   Copyright (C) 2019-2022 Rapid7 Inc.
 
    This program is free software: you can redistribute it and/or modify
    it under the terms of the GNU Affero General Public License as published
@@ -25,6 +25,7 @@ import (
 	"www.velocidex.com/golang/velociraptor/acls"
 	"www.velocidex.com/golang/velociraptor/artifacts"
 	"www.velocidex.com/golang/velociraptor/uploads"
+	"www.velocidex.com/golang/velociraptor/vql"
 	vql_subsystem "www.velocidex.com/golang/velociraptor/vql"
 	"www.velocidex.com/golang/velociraptor/vql/functions"
 	"www.velocidex.com/golang/vfilter"
@@ -36,7 +37,7 @@ import (
 
 type UploadFunctionArgs struct {
 	File     *accessors.OSPath `vfilter:"required,field=file,doc=The file to upload"`
-	Name     string            `vfilter:"optional,field=name,doc=The name of the file that should be stored on the server"`
+	Name     *accessors.OSPath `vfilter:"optional,field=name,doc=The name of the file that should be stored on the server"`
 	Accessor string            `vfilter:"optional,field=accessor,doc=The accessor to use"`
 	Mtime    vfilter.Any       `vfilter:"optional,field=mtime,doc=Modified time to record"`
 	Atime    vfilter.Any       `vfilter:"optional,field=atime,doc=Access time to record"`
@@ -128,13 +129,14 @@ func (self UploadFunction) Info(scope vfilter.Scope, type_map *vfilter.TypeMap) 
 		Doc: "Upload a file to the upload service. For a Velociraptor " +
 			"client this will upload the file into the flow and store " +
 			"it in the server's file store.",
-		ArgType: type_map.AddType(scope, &UploadFunctionArgs{}),
+		ArgType:  type_map.AddType(scope, &UploadFunctionArgs{}),
+		Metadata: vql.VQLMetadata().Permissions(acls.FILESYSTEM_READ).Build(),
 	}
 }
 
 type UploadDirectoryFunctionArgs struct {
 	File       *accessors.OSPath `vfilter:"required,field=file,doc=The file to upload"`
-	Name       string            `vfilter:"optional,field=name,doc=Filename to be stored within the output directory"`
+	Name       *accessors.OSPath `vfilter:"optional,field=name,doc=Filename to be stored within the output directory"`
 	Accessor   string            `vfilter:"optional,field=accessor,doc=The accessor to use"`
 	OutputPath string            `vfilter:"required,field=output,doc=An output directory to store files in."`
 
@@ -235,9 +237,10 @@ func (self *UploadDirectoryFunction) Call(ctx context.Context,
 
 func (self UploadDirectoryFunction) Info(scope vfilter.Scope, type_map *vfilter.TypeMap) *vfilter.FunctionInfo {
 	return &vfilter.FunctionInfo{
-		Name:    "upload_directory",
-		Doc:     "Upload a file to an upload directory. The final filename will be the output directory path followed by the filename path.",
-		ArgType: type_map.AddType(scope, &UploadDirectoryFunctionArgs{}),
+		Name:     "upload_directory",
+		Doc:      "Upload a file to an upload directory. The final filename will be the output directory path followed by the filename path.",
+		ArgType:  type_map.AddType(scope, &UploadDirectoryFunctionArgs{}),
+		Metadata: vql.VQLMetadata().Permissions(acls.FILESYSTEM_WRITE).Build(),
 	}
 }
 

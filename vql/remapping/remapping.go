@@ -8,6 +8,7 @@ import (
 	"www.velocidex.com/golang/velociraptor/accessors"
 	config_proto "www.velocidex.com/golang/velociraptor/config/proto"
 	"www.velocidex.com/golang/velociraptor/constants"
+	"www.velocidex.com/golang/velociraptor/json"
 	vql_subsystem "www.velocidex.com/golang/velociraptor/vql"
 	"www.velocidex.com/golang/vfilter"
 	"www.velocidex.com/golang/vfilter/arg_parser"
@@ -39,14 +40,19 @@ func (self RemappingFunc) Call(ctx context.Context,
 	}
 
 	remapping_config := config_obj.Remappings
-	scope.Log("Applying remapping %v", remapping_config)
+	elided := json.MustMarshalString(remapping_config)
+	if len(elided) > 100 {
+		elided = elided[:100] + " ..."
+	}
+	scope.Log("Applying remapping %v", elided)
 
 	manager := accessors.GetManager(scope)
 	if arg.Clear {
 		manager.Clear()
 	}
 
-	global_device_manager := accessors.GlobalDeviceManager.Copy()
+	global_device_manager := accessors.GetDefaultDeviceManager(
+		config_obj).Copy()
 	for _, cp := range arg.Copy {
 		accessor, err := global_device_manager.GetAccessor(cp, scope)
 		if err != nil {
@@ -61,9 +67,9 @@ func (self RemappingFunc) Call(ctx context.Context,
 	pristine_scope := scope.Copy()
 	pristine_scope.AppendVars(ordereddict.NewDict().
 		Set(constants.SCOPE_DEVICE_MANAGER,
-			accessors.GlobalDeviceManager.Copy()))
+			accessors.GetDefaultDeviceManager(config_obj).Copy()))
 
-	err = ApplyRemappingOnScope(ctx, pristine_scope, scope, manager,
+	err = ApplyRemappingOnScope(ctx, config_obj, pristine_scope, scope, manager,
 		ordereddict.NewDict(), remapping_config)
 	if err != nil {
 		scope.Log("remap: %v", err)

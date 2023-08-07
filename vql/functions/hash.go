@@ -1,6 +1,6 @@
 /*
-   Velociraptor - Hunting Evil
-   Copyright (C) 2019 Velocidex Innovations.
+   Velociraptor - Dig Deeper
+   Copyright (C) 2019-2022 Rapid7 Inc.
 
    This program is free software: you can redistribute it and/or modify
    it under the terms of the GNU Affero General Public License as published
@@ -29,6 +29,8 @@ import (
 
 	"github.com/Velocidex/ordereddict"
 	"www.velocidex.com/golang/velociraptor/accessors"
+	"www.velocidex.com/golang/velociraptor/acls"
+	"www.velocidex.com/golang/velociraptor/vql"
 	vql_subsystem "www.velocidex.com/golang/velociraptor/vql"
 	"www.velocidex.com/golang/vfilter"
 	"www.velocidex.com/golang/vfilter/arg_parser"
@@ -50,6 +52,13 @@ type HashResult struct {
 	sha1   hash.Hash
 	SHA256 string
 	sha256 hash.Hash
+}
+
+func (self *HashResult) ToDict() *ordereddict.Dict {
+	return ordereddict.NewDict().
+		Set("MD5", self.MD5).
+		Set("SHA1", self.SHA1).
+		Set("SHA256", self.SHA256)
 }
 
 type HashFunctionArgs struct {
@@ -89,17 +98,17 @@ func (self *HashFunction) Call(ctx context.Context,
 		return vfilter.Null{}
 	}
 
-	file, err := fs.Open(arg.Path.String())
+	file, err := fs.OpenWithOSPath(arg.Path)
 	if err != nil {
-		scope.Log("hash %s: %v", arg.Path.String(), err.Error())
+		//scope.Log("hash %s: %v", arg.Path.String(), err)
 		return vfilter.Null{}
 	}
 	defer file.Close()
 
-	result := HashResult{}
+	result := &HashResult{}
 
 	if arg.HashSelect == nil {
-		result = HashResult{
+		result = &HashResult{
 			md5:    md5.New(),
 			sha1:   sha1.New(),
 			sha256: sha256.New(),
@@ -146,7 +155,7 @@ func (self *HashFunction) Call(ctx context.Context,
 						result.SHA256 = fmt.Sprintf(
 							"%x", result.sha256.Sum(nil))
 					}
-					return result
+					return result.ToDict()
 				}
 
 			} else if err != nil {
@@ -174,10 +183,11 @@ func (self *HashFunction) Call(ctx context.Context,
 
 func (self HashFunction) Info(scope vfilter.Scope, type_map *vfilter.TypeMap) *vfilter.FunctionInfo {
 	return &vfilter.FunctionInfo{
-		Name:    "hash",
-		Doc:     "Calculate the hash of a file.",
-		ArgType: type_map.AddType(scope, &HashFunctionArgs{}),
-		Version: 2,
+		Name:     "hash",
+		Doc:      "Calculate the hash of a file.",
+		ArgType:  type_map.AddType(scope, &HashFunctionArgs{}),
+		Version:  2,
+		Metadata: vql.VQLMetadata().Permissions(acls.FILESYSTEM_READ).Build(),
 	}
 }
 

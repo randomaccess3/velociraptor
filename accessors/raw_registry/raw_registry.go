@@ -1,6 +1,6 @@
 /*
-   Velociraptor - Hunting Evil
-   Copyright (C) 2019 Velocidex Innovations.
+   Velociraptor - Dig Deeper
+   Copyright (C) 2019-2022 Rapid7 Inc.
 
    This program is free software: you can redistribute it and/or modify
    it under the terms of the GNU Affero General Public License as published
@@ -30,13 +30,14 @@ package raw_registry
 
 import (
 	"bytes"
+	"errors"
 	"os"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/Velocidex/ordereddict"
-	errors "github.com/pkg/errors"
+
 	"www.velocidex.com/golang/regparser"
 	"www.velocidex.com/golang/velociraptor/accessors"
 	"www.velocidex.com/golang/velociraptor/constants"
@@ -120,6 +121,12 @@ type RawRegValueInfo struct {
 	// Containing key
 	*RawRegKeyInfo
 	value *regparser.CM_KEY_VALUE
+
+	// The windows registry can store a value inside a reg key. This
+	// makes the key act both as a directory and as a file
+	// (i.e. ReadDir() will list the key) but Open() will read the
+	// value.
+	is_default_value bool
 }
 
 func (self *RawRegValueInfo) Name() string {
@@ -127,11 +134,15 @@ func (self *RawRegValueInfo) Name() string {
 }
 
 func (self *RawRegValueInfo) IsDir() bool {
-	return false
+	// We are also a key so act as a directory.
+	return self.is_default_value
 }
 
 func (self *RawRegValueInfo) Mode() os.FileMode {
-	return 0755
+	if self.is_default_value {
+		return 0755
+	}
+	return 0644
 }
 
 func (self *RawRegValueInfo) Size() int64 {
@@ -140,13 +151,20 @@ func (self *RawRegValueInfo) Size() int64 {
 
 func (self *RawRegValueInfo) Data() *ordereddict.Dict {
 	value_data := self.value.ValueData()
+	value_type := self.value.TypeString()
+	if self.is_default_value {
+		value_type += "/Key"
+	}
 	result := ordereddict.NewDict().
-		Set("type", self.value.TypeString()).
+		Set("type", value_type).
 		Set("data_len", len(value_data.Data))
 
 	switch value_data.Type {
-	case regparser.REG_SZ, regparser.REG_MULTI_SZ, regparser.REG_EXPAND_SZ:
+	case regparser.REG_SZ, regparser.REG_EXPAND_SZ:
 		result.Set("value", strings.TrimRight(value_data.String, "\x00"))
+
+	case regparser.REG_MULTI_SZ:
+		result.Set("value", value_data.MultiSz)
 
 	case regparser.REG_DWORD, regparser.REG_QWORD, regparser.REG_DWORD_BIG_ENDIAN:
 		result.Set("value", value_data.Uint64)
@@ -174,17 +192,51 @@ func NewRawValueBuffer(buf string, stat *RawRegValueInfo) *RawValueBuffer {
 	}
 }
 
-type RawRegFileSystemAccessor struct {
+type rawHiveCache struct {
 	mu sync.Mutex
 
 	// Maintain a cache of already parsed hives
 	hive_cache map[string]*regparser.Registry
-	scope      vfilter.Scope
-
-	root *accessors.OSPath
 }
 
-func (self *RawRegFileSystemAccessor) getRegHive(
+func (self *rawHiveCache) Get(name string) (*regparser.Registry, bool) {
+	self.mu.Lock()
+	defer self.mu.Unlock()
+
+	res, ok := self.hive_cache[name]
+	return res, ok
+}
+
+func (self *rawHiveCache) Set(name string, reg *regparser.Registry) {
+	self.mu.Lock()
+	defer self.mu.Unlock()
+
+	self.hive_cache[name] = reg
+}
+
+type RawRegFileSystemAccessor struct {
+	scope vfilter.Scope
+	root  *accessors.OSPath
+}
+
+func getRegHiveCache(scope vfilter.Scope) *rawHiveCache {
+	result_any := vql_subsystem.CacheGet(scope, RawRegFileSystemTag)
+	if result_any != nil {
+		cached, ok := result_any.(*rawHiveCache)
+		if ok {
+			return cached
+		}
+	}
+
+	result := &rawHiveCache{
+		hive_cache: make(map[string]*regparser.Registry),
+	}
+	vql_subsystem.CacheSet(scope, RawRegFileSystemTag, result)
+
+	return result
+}
+
+func getRegHive(scope vfilter.Scope,
 	file_path *accessors.OSPath) (*regparser.Registry, error) {
 
 	// Cache the parsed hive under the underlying file.
@@ -195,42 +247,43 @@ func (self *RawRegFileSystemAccessor) getRegHive(
 	}
 	cache_key := base_pathspec.String()
 
-	self.mu.Lock()
-	defer self.mu.Unlock()
+	hive_cache := getRegHiveCache(scope)
+	reg, pres := hive_cache.Get(cache_key)
+	if pres {
+		return reg, nil
+	}
 
 	lru_size := vql_subsystem.GetIntFromRow(
-		self.scope, self.scope, constants.RAW_REG_CACHE_SIZE)
-	hive, pres := self.hive_cache[cache_key]
-	if !pres {
-		delegate, err := file_path.Delegate(self.scope)
-		if err != nil {
-			return nil, err
-		}
+		scope, scope, constants.RAW_REG_CACHE_SIZE)
 
-		paged_reader, err := readers.NewPagedReader(
-			self.scope, pathspec.DelegateAccessor, delegate, int(lru_size))
-		if err != nil {
-			self.scope.Log("%v: did you provide a URL or Pathspec?", err)
-			return nil, err
-		}
-
-		// Make sure we can read the header so we can propagate errors
-		// properly.
-		header := make([]byte, 4)
-		_, err = paged_reader.ReadAt(header, 0)
-		if err != nil {
-			paged_reader.Close()
-			return nil, err
-		}
-
-		hive, err = regparser.NewRegistry(paged_reader)
-		if err != nil {
-			paged_reader.Close()
-			return nil, err
-		}
-
-		self.hive_cache[cache_key] = hive
+	delegate, err := file_path.Delegate(scope)
+	if err != nil {
+		return nil, err
 	}
+
+	paged_reader, err := readers.NewPagedReader(
+		scope, pathspec.DelegateAccessor, delegate, int(lru_size))
+	if err != nil {
+		scope.Log("%v: did you provide a URL or Pathspec?", err)
+		return nil, err
+	}
+
+	// Make sure we can read the header so we can propagate errors
+	// properly.
+	header := make([]byte, 4)
+	_, err = paged_reader.ReadAt(header, 0)
+	if err != nil {
+		paged_reader.Close()
+		return nil, err
+	}
+
+	hive, err := regparser.NewRegistry(paged_reader)
+	if err != nil {
+		paged_reader.Close()
+		return nil, err
+	}
+
+	hive_cache.Set(cache_key, hive)
 
 	return hive, nil
 }
@@ -240,29 +293,9 @@ const RawRegFileSystemTag = "_RawReg"
 func (self *RawRegFileSystemAccessor) New(scope vfilter.Scope) (
 	accessors.FileSystemAccessor, error) {
 
-	result_any := vql_subsystem.CacheGet(scope, RawRegFileSystemTag)
-	if result_any == nil {
-		result := &RawRegFileSystemAccessor{
-			hive_cache: make(map[string]*regparser.Registry),
-			scope:      scope,
-			root:       self.root,
-		}
-		vql_subsystem.CacheSet(scope, RawRegFileSystemTag, result)
-		return result, nil
-	}
-
-	cached, ok := result_any.(*RawRegFileSystemAccessor)
-	if !ok {
-		return nil, errors.New("Cached RawRegFileSystemAccessor invalid")
-	}
-
-	cached.mu.Lock()
-	defer cached.mu.Unlock()
-
 	return &RawRegFileSystemAccessor{
-		hive_cache: cached.hive_cache,
-		scope:      scope,
-		root:       cached.root,
+		scope: scope,
+		root:  self.root,
 	}, nil
 }
 
@@ -291,7 +324,7 @@ func (self *RawRegFileSystemAccessor) ReadDirWithOSPath(
 	[]accessors.FileInfo, error) {
 
 	var result []accessors.FileInfo
-	hive, err := self.getRegHive(full_path)
+	hive, err := getRegHive(self.scope, full_path)
 	if err != nil {
 		return nil, err
 	}
@@ -301,22 +334,36 @@ func (self *RawRegFileSystemAccessor) ReadDirWithOSPath(
 		return nil, errors.New("Key not found")
 	}
 
-	for _, subkey := range key.Subkeys() {
-		result = append(result,
-			&RawRegKeyInfo{
-				key:        subkey,
-				_full_path: full_path.Append(subkey.Name()),
-			})
+	seen := make(map[string]int)
+	for idx, subkey := range key.Subkeys() {
+		basename := subkey.Name()
+		subkey := &RawRegKeyInfo{
+			key:        subkey,
+			_full_path: full_path.Append(basename),
+		}
+		seen[basename] = idx
+		result = append(result, subkey)
 	}
 
 	for _, value := range key.Values() {
-		result = append(result,
-			&RawRegValueInfo{
-				&RawRegKeyInfo{
-					key:        key,
-					_full_path: full_path.Append(value.ValueName()),
-				}, value,
-			})
+		basename := value.ValueName()
+		value_obj := &RawRegValueInfo{
+			RawRegKeyInfo: &RawRegKeyInfo{
+				key:        key,
+				_full_path: full_path.Append(basename),
+			},
+			value: value,
+		}
+
+		// Does this value have the same name as one of the keys?
+		idx, pres := seen[basename]
+		if pres {
+			// Replace the old object with the value object
+			value_obj.is_default_value = true
+			result[idx] = value_obj
+		} else {
+			result = append(result, value_obj)
+		}
 	}
 
 	return result, nil
@@ -324,12 +371,38 @@ func (self *RawRegFileSystemAccessor) ReadDirWithOSPath(
 
 func (self *RawRegFileSystemAccessor) Open(path string) (
 	accessors.ReadSeekCloser, error) {
-	return nil, errors.New("Not implemented")
+	stat, err := self.Lstat(path)
+	if err != nil {
+		return nil, err
+	}
+
+	value_info, ok := stat.(*RawRegValueInfo)
+	if ok {
+		return NewValueBuffer(
+			value_info.value.ValueData().Data, stat), nil
+	}
+
+	// Keys do not have any data.
+	serialized, _ := json.Marshal(stat.Data)
+	return NewValueBuffer(serialized, stat), nil
 }
 
 func (self *RawRegFileSystemAccessor) OpenWithOSPath(path *accessors.OSPath) (
 	accessors.ReadSeekCloser, error) {
-	return nil, errors.New("Not implemented")
+	stat, err := self.LstatWithOSPath(path)
+	if err != nil {
+		return nil, err
+	}
+
+	value_info, ok := stat.(*RawRegValueInfo)
+	if ok {
+		return NewValueBuffer(
+			value_info.value.ValueData().Data, stat), nil
+	}
+
+	// Keys do not have any data.
+	serialized, _ := json.Marshal(stat.Data)
+	return NewValueBuffer(serialized, stat), nil
 }
 
 func (self *RawRegFileSystemAccessor) Lstat(filename string) (

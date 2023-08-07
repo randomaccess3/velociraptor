@@ -3,6 +3,7 @@ package accessors
 import (
 	"context"
 	"fmt"
+	"reflect"
 
 	"github.com/Velocidex/ordereddict"
 	"www.velocidex.com/golang/velociraptor/file_store/api"
@@ -31,8 +32,17 @@ func parseOSPath(ctx context.Context,
 	case types.LazyExpr:
 		return parseOSPath(ctx, scope, args, t.ReduceWithScope(ctx, scope))
 
+	case types.Materializer:
+		return parseOSPath(ctx, scope, args, t.Materialize(ctx, scope))
+
 	case *OSPath:
 		return t, nil
+
+	case *PathSpec:
+		return accessor.ParsePath(t.String())
+
+	case PathSpec:
+		return accessor.ParsePath(t.String())
 
 	case api.FSPathSpec:
 		// Create an OSPath to represent the abstract filestore path.
@@ -56,6 +66,11 @@ func parseOSPath(ctx context.Context,
 		}
 		return MustNewFileStorePath("ds:").Append(components...), nil
 
+		// WHERE version(plugin="glob") > 2:
+		// Initializer can be a list of components. In this case we
+		// take the base pathspec (which is accessor determined) and
+		// add the components to it.
+
 	case string:
 		return accessor.ParsePath(t)
 
@@ -63,6 +78,33 @@ func parseOSPath(ctx context.Context,
 		return accessor.ParsePath(string(t))
 
 	default:
+		result, _ := accessor.ParsePath("")
+
+		// Is it an array? Generic code to handle arrays - just append
+		// each element together to form a single path. This allows
+		// joining components directly:
+		//     ["bin", "ls"] or ["/usr/bin", "ls"]
+		a_value := reflect.Indirect(reflect.ValueOf(value))
+		if a_value.Type().Kind() == reflect.Slice {
+			for idx := 0; idx < a_value.Len(); idx++ {
+				slice_item := a_value.Index(int(idx)).Interface()
+				item, err := parseOSPath(ctx, scope, args, slice_item)
+				if err != nil {
+					string_item, ok := slice_item.(string)
+					if ok {
+						result = result.Append(string_item)
+					}
+					continue
+				}
+				item_os_path, ok := item.(*OSPath)
+				if ok {
+					result = result.Append(item_os_path.Components...)
+				}
+			}
+			return result, nil
+		}
+
+		// This is a fatal error on the client.
 		return nil, fmt.Errorf("Expecting a path arg type, not %T", t)
 	}
 }
@@ -78,6 +120,12 @@ func ParseOSPath(ctx context.Context,
 	case *OSPath:
 		return t, nil
 
+	case *PathSpec:
+		return accessor.ParsePath(t.String())
+
+	case PathSpec:
+		return accessor.ParsePath(t.String())
+
 	case string:
 		return accessor.ParsePath(t)
 
@@ -89,6 +137,42 @@ func ParseOSPath(ctx context.Context,
 	}
 }
 
+func parseOSPathArray(ctx context.Context,
+	scope types.Scope, args *ordereddict.Dict,
+	value interface{}) (interface{}, error) {
+
+	result := []*OSPath{}
+
+	a_value := reflect.Indirect(reflect.ValueOf(value))
+	if a_value.Type().Kind() == reflect.Slice {
+		for idx := 0; idx < a_value.Len(); idx++ {
+			item, err := parseOSPath(ctx, scope, args,
+				a_value.Index(int(idx)).Interface())
+			if err != nil {
+				continue
+			}
+			item_os_path, ok := item.(*OSPath)
+			if ok {
+				result = append(result, item_os_path)
+			}
+		}
+		return result, nil
+	}
+
+	// If the arg is not a slice then treat it as a single ospath.
+	item, err := parseOSPath(ctx, scope, args, value)
+	if err != nil {
+		return nil, err
+	}
+
+	item_os_path, ok := item.(*OSPath)
+	if ok {
+		result = append(result, item_os_path)
+	}
+	return result, nil
+}
+
 func init() {
 	arg_parser.RegisterParser(&OSPath{}, parseOSPath)
+	arg_parser.RegisterParser([]*OSPath{}, parseOSPathArray)
 }

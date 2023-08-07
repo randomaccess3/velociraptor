@@ -2,7 +2,6 @@ package repository
 
 import (
 	"context"
-	"sync"
 
 	"github.com/Velocidex/ordereddict"
 	"www.velocidex.com/golang/velociraptor/accessors"
@@ -12,19 +11,27 @@ import (
 	"www.velocidex.com/golang/velociraptor/json"
 	"www.velocidex.com/golang/velociraptor/services"
 	vql_subsystem "www.velocidex.com/golang/velociraptor/vql"
+	"www.velocidex.com/golang/velociraptor/vql/acl_managers"
+	"www.velocidex.com/golang/velociraptor/vql/grouper"
+	"www.velocidex.com/golang/velociraptor/vql/materializer"
 	"www.velocidex.com/golang/velociraptor/vql/remapping"
 	"www.velocidex.com/golang/velociraptor/vql/sorter"
 	"www.velocidex.com/golang/vfilter"
+	"www.velocidex.com/golang/vfilter/explain"
 )
 
-func _build(wg *sync.WaitGroup, self services.ScopeBuilder, from_scratch bool) vfilter.Scope {
+func _build(self services.ScopeBuilder, from_scratch bool) vfilter.Scope {
 	env := ordereddict.NewDict()
 	if self.Env != nil {
 		env.MergeFrom(self.Env)
 	}
+	_, pres := env.Get("_SessionId")
+	if !pres {
+		env.Set("_SessionId", "")
+	}
 
 	if self.Repository == nil {
-		manager, _ := services.GetRepositoryManager()
+		manager, _ := services.GetRepositoryManager(self.Config)
 		if manager == nil {
 			return vfilter.NewScope()
 		}
@@ -43,7 +50,8 @@ func _build(wg *sync.WaitGroup, self services.ScopeBuilder, from_scratch bool) v
 	cache := vql_subsystem.NewScopeCache()
 	env.Set(vql_subsystem.CACHE_VAR, cache)
 
-	device_manager := accessors.GlobalDeviceManager.Copy()
+	device_manager := accessors.GetDefaultDeviceManager(
+		self.Config).Copy()
 	env.Set(constants.SCOPE_DEVICE_MANAGER, device_manager)
 
 	if self.Config != nil {
@@ -77,8 +85,13 @@ func _build(wg *sync.WaitGroup, self services.ScopeBuilder, from_scratch bool) v
 
 	// Use our own sorter
 	scope.SetSorter(sorter.MergeSorter{ChunkSize: 10000})
+	scope.SetGrouper(grouper.NewMergeSortGrouperFactory(self.Config, 10000))
+	scope.SetMaterializer(materializer.NewMaterializer())
 
-	artifact_plugin := NewArtifactRepositoryPlugin(wg, self.Repository.(*Repository))
+	// For now explain messages will go to the log stream.
+	scope.SetExplainer(explain.NewLoggingExplainer(scope))
+
+	artifact_plugin := NewArtifactRepositoryPlugin(self.Repository, self.Config)
 	env.Set("Artifact", artifact_plugin)
 
 	scope.AppendVars(env).AddProtocolImpl(
@@ -94,13 +107,14 @@ func _build(wg *sync.WaitGroup, self services.ScopeBuilder, from_scratch bool) v
 		pristine_scope := scope.Copy()
 		pristine_scope.AppendVars(ordereddict.NewDict().
 			Set(constants.SCOPE_DEVICE_MANAGER,
-				accessors.GlobalDeviceManager.Copy()))
+				accessors.GetDefaultDeviceManager(self.Config).Copy()))
 
 		device_manager.Clear()
 
 		// Pass pristine scope to delegates.
 		err := remapping.ApplyRemappingOnScope(
 			context.Background(),
+			self.Config,
 			pristine_scope, // Pristine scope
 			scope,          // Remapped scope
 			device_manager,
@@ -111,8 +125,8 @@ func _build(wg *sync.WaitGroup, self services.ScopeBuilder, from_scratch bool) v
 
 		// Reduce permissions based on the configuration.
 		if self.ACLManager != nil {
-			new_acl_manager, err := accessors.GetRemappingACLManager(
-				self.ACLManager, self.Config.Remappings)
+			new_acl_manager, err := acl_managers.GetRemappingACLManager(
+				self.Config, self.ACLManager, self.Config.Remappings)
 			if err != nil {
 				scope.Log("Applying remapping: %v", err)
 			}
@@ -122,7 +136,7 @@ func _build(wg *sync.WaitGroup, self services.ScopeBuilder, from_scratch bool) v
 	}
 
 	_ = scope.AddDestructor(func() {
-		scope.Log("Query Stats: %v", json.MustMarshalString(
+		scope.Log("DEBUG:Query Stats: %v", json.MustMarshalString(
 			scope.GetStats().Snapshot()))
 	})
 
@@ -130,10 +144,10 @@ func _build(wg *sync.WaitGroup, self services.ScopeBuilder, from_scratch bool) v
 }
 
 func (self *RepositoryManager) BuildScope(builder services.ScopeBuilder) vfilter.Scope {
-	return _build(self.wg, builder, false)
+	return _build(builder, false)
 }
 
 func (self *RepositoryManager) BuildScopeFromScratch(
 	builder services.ScopeBuilder) vfilter.Scope {
-	return _build(self.wg, builder, true)
+	return _build(builder, true)
 }

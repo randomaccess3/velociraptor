@@ -1,8 +1,6 @@
-// +build server_vql
-
 /*
-   Velociraptor - Hunting Evil
-   Copyright (C) 2019 Velocidex Innovations.
+   Velociraptor - Dig Deeper
+   Copyright (C) 2019-2022 Rapid7 Inc.
 
    This program is free software: you can redistribute it and/or modify
    it under the terms of the GNU Affero General Public License as published
@@ -30,6 +28,7 @@ import (
 	"www.velocidex.com/golang/velociraptor/result_sets"
 	"www.velocidex.com/golang/velociraptor/services"
 	"www.velocidex.com/golang/velociraptor/utils"
+	"www.velocidex.com/golang/velociraptor/vql"
 	vql_subsystem "www.velocidex.com/golang/velociraptor/vql"
 	"www.velocidex.com/golang/velociraptor/vql/functions"
 	"www.velocidex.com/golang/vfilter"
@@ -78,7 +77,7 @@ func (self MonitoringPlugin) Call(
 			arg.Source = ""
 		}
 
-		path_manager, err := artifact_paths.NewArtifactPathManager(
+		path_manager, err := artifact_paths.NewArtifactPathManager(ctx,
 			config_obj, arg.ClientId, arg.FlowId, arg.Artifact)
 		if err != nil {
 			scope.Log("monitoring: %v", err)
@@ -135,7 +134,8 @@ func (self MonitoringPlugin) Info(scope vfilter.Scope, type_map *vfilter.TypeMap
 		Name: "monitoring",
 		Doc: "Extract monitoring log from a client. If client_id is not specified " +
 			"we watch the global journal which contains event logs from all clients.",
-		ArgType: type_map.AddType(scope, &SourcePluginArgs{}),
+		ArgType:  type_map.AddType(scope, &SourcePluginArgs{}),
+		Metadata: vql.VQLMetadata().Permissions(acls.READ_RESULTS).Build(),
 	}
 }
 
@@ -162,7 +162,13 @@ func (self WatchMonitoringPlugin) Call(
 			return
 		}
 
-		journal, _ := services.GetJournal()
+		config_obj, ok := vql_subsystem.GetServerConfig(scope)
+		if !ok {
+			scope.Log("Command can only run on the server")
+			return
+		}
+
+		journal, _ := services.GetJournal(config_obj)
 		if err != nil {
 			return
 		}
@@ -179,13 +185,7 @@ func (self WatchMonitoringPlugin) Call(
 			return
 		}
 
-		config_obj, ok := vql_subsystem.GetServerConfig(scope)
-		if !ok {
-			scope.Log("Command can only run on the server")
-			return
-		}
-
-		mode, err := artifact_paths.GetArtifactMode(
+		mode, err := artifact_paths.GetArtifactMode(ctx,
 			config_obj, arg.Artifact)
 		if err != nil {
 			scope.Log("Artifact %s not known", arg.Artifact)
@@ -229,7 +229,8 @@ func (self WatchMonitoringPlugin) Info(scope vfilter.Scope,
 		Doc: "Watch clients' monitoring log. This is an event plugin. If " +
 			"client_id is not provided we watch the global journal which contains " +
 			"events from all clients.",
-		ArgType: type_map.AddType(scope, &WatchMonitoringPluginArgs{}),
+		ArgType:  type_map.AddType(scope, &WatchMonitoringPluginArgs{}),
+		Metadata: vql.VQLMetadata().Permissions(acls.READ_RESULTS).Build(),
 	}
 }
 

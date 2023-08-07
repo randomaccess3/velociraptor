@@ -1,6 +1,6 @@
 /*
-   Velociraptor - Hunting Evil
-   Copyright (C) 2019 Velocidex Innovations.
+   Velociraptor - Dig Deeper
+   Copyright (C) 2019-2022 Rapid7 Inc.
 
    This program is free software: you can redistribute it and/or modify
    it under the terms of the GNU Affero General Public License as published
@@ -26,7 +26,8 @@ import (
 
 	"github.com/Velocidex/ordereddict"
 	"github.com/dustin/go-humanize"
-	errors "github.com/pkg/errors"
+	errors "github.com/go-errors/errors"
+
 	"github.com/sirupsen/logrus"
 	context "golang.org/x/net/context"
 	"www.velocidex.com/golang/velociraptor/actions"
@@ -36,6 +37,7 @@ import (
 	"www.velocidex.com/golang/velociraptor/logging"
 	"www.velocidex.com/golang/velociraptor/services"
 	vql_subsystem "www.velocidex.com/golang/velociraptor/vql"
+	"www.velocidex.com/golang/velociraptor/vql/acl_managers"
 	"www.velocidex.com/golang/vfilter"
 )
 
@@ -49,6 +51,7 @@ func streamQuery(
 	logger := logging.GetLogger(config_obj, &logging.APICmponent)
 	logger.WithFields(logrus.Fields{
 		"arg":  arg,
+		"org":  arg.OrgId,
 		"user": peer_name,
 	}).Info("Query API call")
 
@@ -72,7 +75,7 @@ func streamQuery(
 	scope_logger := MakeLogger(ctx, response_channel)
 
 	// Add extra artifacts to the query from the global repository.
-	manager, err := services.GetRepositoryManager()
+	manager, err := services.GetRepositoryManager(config_obj)
 	if err != nil {
 		return err
 	}
@@ -83,7 +86,7 @@ func streamQuery(
 
 	builder := services.ScopeBuilder{
 		Config:     config_obj,
-		ACLManager: vql_subsystem.NewServerACLManager(config_obj, peer_name),
+		ACLManager: acl_managers.NewServerACLManager(config_obj, peer_name),
 		Logger:     scope_logger,
 		Repository: repository,
 		Env:        ordereddict.NewDict(),
@@ -141,7 +144,8 @@ func streamQuery(
 			// All the queries will use the same scope. This allows one
 			// query to define functions for the next query in order.
 			for query_idx, vql := range statements {
-				logger.Info("Query: Running %v\n", vql.ToString(scope))
+				logger.Info("Query: Running %v\n",
+					vfilter.FormatToString(scope, vql))
 
 				result_chan := vfilter.GetResponseChannel(
 					vql, subctx, scope,
@@ -208,5 +212,5 @@ func (self *logWriter) Write(b []byte) (int, error) {
 
 func MakeLogger(ctx context.Context, output chan *actions_proto.VQLResponse) *log.Logger {
 	result := &logWriter{output: output, ctx: ctx}
-	return log.New(result, "vql: ", 0)
+	return log.New(result, "", 0)
 }

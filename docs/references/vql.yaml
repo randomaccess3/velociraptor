@@ -14,6 +14,8 @@
     type: string
     description: Add this artifact to this label group (default all)
   category: server
+  metadata:
+    permissions: COLLECT_CLIENT
 - name: add_server_monitoring
   description: Adds a new artifact to the server monitoring table.
   type: Function
@@ -26,6 +28,40 @@
     type: LazyExpr
     description: A dict of artifact parameters
   category: server
+  metadata:
+    permissions: COLLECT_SERVER
+- name: alert
+  description: Generate an alert message.
+  type: Function
+  version: 2
+  args:
+  - name: name
+    type: string
+    description: Name of the alert.
+    required: true
+  - name: dedup
+    type: int64
+    description: Suppress same message in this many seconds (default 7200 sec or 2
+      hours).
+  - name: condition
+    type: Any
+    description: If specified we ignore the alert unless the condition is true
+- name: all
+  description: Returns TRUE if all items are true.
+  type: Function
+  args:
+  - name: items
+    type: Any
+    description: The items to consider. Can be an array, subquery or stored query.
+      Will only be lazily evaluated!
+    required: true
+  - name: filter
+    type: vfilter.Lambda
+    description: A callback to consider each item
+  - name: regex
+    type: string
+    description: Optionally one or more regex can be provided for convenience
+    repeated: true
 - name: amsi
   description: |
     AMSI is an interface on windows to scan a string for malware. This
@@ -38,6 +74,22 @@
     description: A string to scan
     required: true
   category: windows
+- name: any
+  description: Returns TRUE if any items are true.
+  type: Function
+  args:
+  - name: items
+    type: Any
+    description: The items to consider. Can be an array, subquery or stored query.
+      Will only be lazily evaluated!
+    required: true
+  - name: filter
+    type: vfilter.Lambda
+    description: A callback to consider each item
+  - name: regex
+    type: string
+    description: Optionally one or more regex can be provided for convenience
+    repeated: true
 - name: appcompatcache
   description: Parses the appcompatcache.
   type: Plugin
@@ -74,6 +126,8 @@
     type: bool
     description: If true we remove extra metadata.
   category: server
+  metadata:
+    permissions: READ_RESULTS
 - name: artifact_delete
   description: Deletes an artifact from the global repository.
   type: Function
@@ -82,6 +136,8 @@
     type: string
     description: The Artifact to delete
   category: server
+  metadata:
+    permissions: ARTIFACT_WRITER,SERVER_ARTIFACT_WRITER
 - name: artifact_set
   description: Sets an artifact into the global repository.
   type: Function
@@ -93,6 +149,8 @@
     type: string
     description: Required name prefix
   category: server
+  metadata:
+    permissions: ARTIFACT_WRITER,SERVER_ARTIFACT_WRITER
 - name: atexit
   description: |
     Install a query to run when the query is unwound. This is used to
@@ -106,6 +164,7 @@
     })
     ```
   type: Function
+  version: 1
   args:
   - name: query
     type: Any
@@ -139,11 +198,13 @@
     binary before using this plugin.
   type: Plugin
   category: linux
+  metadata:
+    permissions: MACHINE_STATE
 - name: authenticode
   description: |
-    This plugin parses authenticode information from PE files.
+    Parses authenticode information from PE files.
 
-    On windows, the plugin will also use the windows API to determine
+    On windows, the function will also use the windows API to determine
     if the binary is trusted by the system.
   type: Function
   args:
@@ -158,6 +219,8 @@
     type: bool
     description: Set to receive verbose information about all the certs.
   category: windows
+  metadata:
+    permissions: MACHINE_STATE
 - name: base64decode
   description: Decodes a base64 encoded string.
   type: Function
@@ -176,6 +239,13 @@
     description: A string to decode
     required: true
   category: basic
+- name: base85decode
+  type: Function
+  args:
+  - name: string
+    type: string
+    description: A string to decode
+    required: true
 - name: basename
   description: |
     Return the basename of the path. For example basename(path="/foo/bar") -> "bar"
@@ -274,6 +344,8 @@
   - name: flow_id
     type: string
   category: server
+  metadata:
+    permissions: COLLECT_SERVER,COLLECT_CLIENT
 - name: certificates
   description: |
     Collect certificate from the system trust store.
@@ -334,6 +406,31 @@
     repeated: true
     required: true
   category: server
+- name: client_create
+  description: Create a new client in the data store.
+  type: Function
+  args:
+  - name: first_seen_at
+    type: time.Time
+  - name: last_seen_at
+    type: time.Time
+  - name: labels
+    type: string
+    repeated: true
+  - name: os
+    type: string
+    description: What type of OS this is (default offline)
+  - name: hostname
+    type: string
+    description: The hostname of the system
+  - name: client_id
+    type: string
+    description: if set we use this client id otherwise we make a new one
+  - name: mac_addresses
+    type: string
+    repeated: true
+  metadata:
+    permissions: SERVER_ADMIN
 - name: client_delete
   description: |
     Delete all information related to a client from the filestore.
@@ -347,6 +444,8 @@
   - name: really_do_it
     type: bool
   category: server
+  metadata:
+    permissions: DELETE_RESULTS
 - name: client_info
   description: |
     Returns client info (like the fqdn) from the datastore.
@@ -366,6 +465,8 @@
     type: string
     required: true
   category: server
+  metadata:
+    permissions: READ_RESULTS
 - name: client_metadata
   description: |
     Returns client metadata from the datastore.
@@ -379,6 +480,8 @@
     type: string
     required: true
   category: server
+  metadata:
+    permissions: READ_RESULTS,SERVER_ADMIN
 - name: client_set_metadata
   description: |
     Sets client metadata.
@@ -397,7 +500,12 @@
   - name: client_id
     type: string
     required: true
+  - name: metadata
+    type: ordereddict.Dict
+    description: A dict containing metadata. If not specified we use kwargs.
   category: server
+  metadata:
+    permissions: COLLECT_CLIENT,SERVER_ADMIN
 - name: clients
   description: Retrieve the list of clients.
   type: Plugin
@@ -415,6 +523,8 @@
   - name: client_id
     type: string
   category: server
+  metadata:
+    permissions: READ_RESULTS
 - name: clock
   description: |
     Generate a timestamp periodically. This is mostly useful for event
@@ -467,7 +577,7 @@
     description: A path to write the output file on.
   - name: report
     type: string
-    description: A path to write the report on.
+    description: A path to write the report on (deprecated and ignored).
   - name: args
     type: Any
     description: Optional parameters.
@@ -476,7 +586,7 @@
     description: An optional password to encrypt the collection zip.
   - name: format
     type: string
-    description: Output format (csv, jsonl).
+    description: Output format (csv, jsonl, csv_only).
   - name: artifact_definitions
     type: Any
     description: Optional additional custom artifacts.
@@ -504,7 +614,13 @@
     type: float64
     description: Total amount of time in seconds, this collection will take. Collection
       is cancelled when timeout is exceeded.
+  - name: metadata
+    type: StoredQuery
+    description: Metadata to store in the zip archive. Outputs to metadata.json in
+      top level of zip file.
   category: plugin
+  metadata:
+    permissions: FILESYSTEM_WRITE
 - name: collect_client
   description: |
     Launch an artifact collection against a client. If the client_id
@@ -587,7 +703,12 @@
     type: bool
     description: Set the collection as urgent - skips other queues collections on
       the client.
+  - name: org_id
+    type: string
+    description: If set the collection will be started in the specified org.
   category: server
+  metadata:
+    permissions: COLLECT_CLIENT,COLLECT_SERVER
 - name: column_filter
   description: |
     Select columns from another query using regex.
@@ -667,6 +788,8 @@
     type: string
     description: A path to write the output - default is the path with a .gz extension
   category: server
+  metadata:
+    permissions: FILESYSTEM_WRITE,FILESYSTEM_READ
 - name: connections
   description: |
     List all active connections
@@ -674,6 +797,8 @@
     On windows this uses the API to list active sockets.
   type: Plugin
   category: plugin
+  metadata:
+    permissions: MACHINE_STATE
 - name: copy
   description: |
     Copy a file.
@@ -695,7 +820,7 @@
   type: Function
   args:
   - name: filename
-    type: string
+    type: accessors.OSPath
     description: The file to copy from.
     required: true
   - name: accessor
@@ -712,6 +837,8 @@
     type: bool
     description: If true we append to the target file otherwise truncate it
   category: basic
+  metadata:
+    permissions: FILESYSTEM_WRITE,FILESYSTEM_READ
 - name: count
   description: |
     Counts the items.
@@ -758,14 +885,26 @@
     description: If set we wait for the download to complete before returning.
   - name: type
     type: string
-    description: Type of download to create (e.g. 'report') default a full zip file.
+    description: Type of download to create (deprecated Ignored).
   - name: template
     type: string
-    description: Report template to use (defaults to Reporting.Default).
+    description: Report template to use (deprecated Ignored).
   - name: password
     type: string
     description: An optional password to encrypt the collection zip.
+  - name: format
+    type: string
+    description: Format to export (csv,json,csv_only) defaults to both.
+  - name: expand_sparse
+    type: bool
+    description: If set we expand sparse files in the archive.
+  - name: name
+    type: string
+    description: If specified we call the file this name otherwise we generate name
+      based on flow id.
   category: server
+  metadata:
+    permissions: PREPARE_RESULTS
 - name: create_hunt_download
   description: |
     Creates a download pack for a hunt.
@@ -797,7 +936,22 @@
   - name: password
     type: string
     description: An optional password to encrypt the collection zip.
+  - name: expand_sparse
+    type: bool
+    description: If set we expand sparse files in the archive.
   category: server
+  metadata:
+    permissions: PREPARE_RESULTS
+- name: create_notebook_download
+  description: Creates a notebook export zip file.
+  type: Function
+  args:
+  - name: notebook_id
+    type: string
+    description: Client ID to export.
+    required: true
+  metadata:
+    permissions: PREPARE_RESULTS
 - name: crypto_rc4
   description: Apply rc4 to the string and key.
   type: Function
@@ -811,6 +965,59 @@
     description: Rc4 key (1-256bytes).
     required: true
   category: plugin
+- name: delay
+  description: Executes 'query' and delays relaying the rows by the specified number
+    of seconds.
+  type: Plugin
+  args:
+  - name: query
+    type: StoredQuery
+    description: Source for rows.
+    required: true
+  - name: delay
+    type: int64
+    description: Number of seconds to delay.
+    required: true
+  - name: buffer_size
+    type: int64
+    description: Maximum number of rows to buffer (default 1000).
+- name: delete_events
+  description: Delete all the files that make up a flow.
+  type: Plugin
+  args:
+  - name: artifact
+    type: string
+    description: Name of artifact events to remove
+    required: true
+  - name: client_id
+    type: string
+    description: Client ID of events to remove (use 'server' for server events)
+    required: true
+  - name: start_time
+    type: time.Time
+    description: Start time to be deleted
+  - name: end_time
+    type: time.Time
+    description: End time to be deleted
+  - name: really_do_it
+    type: bool
+    description: If not specified, just show what files will be removed
+  metadata:
+    permissions: DELETE_RESULTS
+- name: delete_flow
+  description: Delete all the files that make up a flow.
+  type: Plugin
+  args:
+  - name: flow_id
+    type: string
+    required: true
+  - name: client_id
+    type: string
+    required: true
+  - name: really_do_it
+    type: bool
+  metadata:
+    permissions: DELETE_RESULTS
 - name: dict
   description: |
     Construct a dict from arbitrary keyword args.
@@ -960,6 +1167,21 @@
     plugin (see Windows.Events.DNSQueries)
   type: Plugin
   category: windows
+- name: efivariables
+  description: Enumerate efi variables.
+  type: Plugin
+  args:
+  - name: namespace
+    type: string
+    description: Variable namespace.
+  - name: name
+    type: string
+    description: Variable name
+  - name: value
+    type: bool
+    description: Read variable value
+  metadata:
+    permissions: MACHINE_STATE
 - name: elastic_upload
   description: |
     Upload rows to elastic.
@@ -987,7 +1209,6 @@
   - name: type
     type: string
     description: The type of the index to upload to.
-    required: true
   - name: chunk_size
     type: int64
     description: The number of rows to send at the time.
@@ -1016,12 +1237,21 @@
     description: Pipeline for uploads
   - name: disable_ssl_security
     type: bool
+    description: Disable ssl certificate verifications (deprecated in favor of SkipVerify).
+  - name: skip_verify
+    type: bool
     description: Disable ssl certificate verifications.
   - name: root_ca
     type: string
     description: As a better alternative to disable_ssl_security, allows root ca certs
       to be added here.
+  - name: max_memory_buffer
+    type: uint64
+    description: How large we allow the memory buffer to grow to while we are trying
+      to contact the Elastic server (default 100mb).
   category: server
+  metadata:
+    permissions: COLLECT_SERVER
 - name: encode
   description: Encodes a string as as different type. Currently supported types include
     'hex', 'base64'.
@@ -1074,6 +1304,8 @@
   - name: flow_id
     type: string
   category: server
+  metadata:
+    permissions: READ_RESULTS
 - name: environ
   description: |
     Get an environment variable.
@@ -1084,6 +1316,8 @@
     description: Extract the var from the environment.
     required: true
   category: basic
+  metadata:
+    permissions: MACHINE_STATE
 - name: environ
   description: |
     The row returned will have all environment variables as
@@ -1132,7 +1366,12 @@
   - name: env
     type: LazyExpr
     description: Environment variables to launch with.
+  - name: cwd
+    type: string
+    description: If specified we change to this working directory first.
   category: plugin
+  metadata:
+    permissions: EXECVE
 - name: expand
   description: |
     Expand the path using the environment.
@@ -1165,6 +1404,8 @@
     description: A path with environment escapes
     required: true
   category: basic
+  metadata:
+    permissions: MACHINE_STATE
 - name: favorites_delete
   description: Delete a favorite.
   type: Function
@@ -1314,6 +1555,8 @@
     description: A VFS path to remove
     required: true
   category: server
+  metadata:
+    permissions: SERVER_ADMIN
 - name: filesystems
   description: |
     Enumerates mounted filesystems.
@@ -1342,9 +1585,24 @@
     the entire row once for each item.
   type: Plugin
   args:
-  - name: Name
-    type: string
+  - name: query
+    type: StoredQuery
+    required: true
   category: plugin
+- name: flow_logs
+  description: Retrieve the query logs of a flow.
+  type: Plugin
+  args:
+  - name: flow_id
+    type: string
+    description: The flow id to read.
+    required: true
+  - name: client_id
+    type: string
+    description: The client id to extract
+    required: true
+  metadata:
+    permissions: READ_RESULTS
 - name: flow_results
   description: |
     Retrieve the results of a flow.
@@ -1370,6 +1628,8 @@
     description: The client id to extract
     required: true
   category: server
+  metadata:
+    permissions: READ_RESULTS
 - name: flows
   description: |
     Retrieve the flows launched on each client.
@@ -1384,6 +1644,8 @@
   - name: flow_id
     type: string
   category: server
+  metadata:
+    permissions: READ_RESULTS
 - name: for
   description: |
     Iterate over a list.
@@ -1512,7 +1774,32 @@
       WHERE System.EventID.Value = 104
     })
     ```
+
+    NOTE: The generate() function produces a stored query that can be
+    used as the target of any `SELECT ... FROM` statement. Therefore
+    it does not make sense to materialize the output of generate()
+    because it is equivalent to materializing the actual target query
+    itself.
+
+    In other words this:
+
+    ```
+    LET X <= generate(query={ SELECT * FROM watch_etw(...) })
+    ```
+
+    Will attempt to enumerate the target query into an array and is
+    equivalent to:
+
+    ```
+    LET X <= SELECT * FROM watch_etw(...)
+    ```
+
+    Neither of those queries will terminate as VQL waits for them to
+    produce all their rows before moving to the next statement but the
+    `watch_etw()` query will never terminate since it is an event
+    query.
   type: Function
+  version: 2
   args:
   - name: name
     type: string
@@ -1526,6 +1813,9 @@
   - name: with_file_buffer
     type: bool
     description: Enable file buffering
+  - name: fan_out
+    type: int64
+    description: Wait for this many listeners to connect before starting the query
   category: basic
 - name: geoip
   description: |
@@ -1534,6 +1824,7 @@
     must be locally accessible so this probably only makes sense on
     the server.
   type: Function
+  version: 1
   args:
   - name: ip
     type: string
@@ -1593,6 +1884,19 @@
     the data structure to add additional event queries.
   type: Function
   category: server
+  metadata:
+    permissions: READ_RESULTS
+- name: get_flow
+  description: Gets flow details.
+  type: Function
+  args:
+  - name: client_id
+    type: string
+    required: true
+  - name: flow_id
+    type: string
+  metadata:
+    permissions: COLLECT_CLIENT,COLLECT_SERVER
 - name: get_server_monitoring
   description: |
     Retrieve the current server monitoring state.
@@ -1600,6 +1904,8 @@
     See `get_client_monitoring()`
   type: Function
   category: server
+  metadata:
+    permissions: READ_RESULTS
 - name: getpid
   description: |
     Returns the current pid of the Velociraptor process.
@@ -1607,6 +1913,8 @@
     This is typically used to exclude analysis from our own process.
   type: Function
   category: basic
+  metadata:
+    permissions: MACHINE_STATE
 - name: glob
   description: |
     Retrieve files based on a list of glob expressions
@@ -1693,6 +2001,7 @@
         recursion_callback="x=>NOT x.Name =~ '^/(proc|sys|snap)'")
     ```
   type: Plugin
+  version: 3
   args:
   - name: globs
     type: string
@@ -1700,7 +2009,7 @@
     repeated: true
     required: true
   - name: root
-    type: string
+    type: accessors.OSPath
     description: The root directory to glob from (default '').
   - name: accessor
     type: string
@@ -1716,6 +2025,8 @@
     type: bool
     description: If set we do not follow links to other filesystems.
   category: plugin
+  metadata:
+    permissions: FILESYSTEM_READ
 - name: grep
   description: |
     Search a file for keywords.
@@ -1768,16 +2079,32 @@
   description: |
     Retrieve the list of users on the server.
   type: Plugin
+  args:
+  - name: all_orgs
+    type: bool
+    description: If set we enumerate permission for all orgs, otherwise just for this
+      org.
   category: server
+- name: gunzip
+  description: Apply Gunzip to the data.
+  type: Function
+  args:
+  - name: string
+    type: string
+    description: Data to apply Gunzip
+    required: true
 - name: handles
   description: |
     Enumerate process handles.
   type: Plugin
   args:
   - name: pid
-    type: int64
-    description: The PID to dump out.
-    required: true
+    type: uint64
+    description: If specified only get handles from these PIDs.
+  - name: types
+    type: string
+    description: If specified only get handles of this type.
+    repeated: true
   category: windows
 - name: hash
   description: |
@@ -1785,6 +2112,7 @@
 
     This function calculates the MD5, SHA1 and SHA256 hashes of the file.
   type: Function
+  version: 2
   args:
   - name: path
     type: accessors.OSPath
@@ -1798,6 +2126,8 @@
     description: The hash function to use (MD5,SHA1,SHA256)
     repeated: true
   category: plugin
+  metadata:
+    permissions: FILESYSTEM_READ
 - name: http_client
   description: |
     Make a http request.
@@ -1882,6 +2212,7 @@
     how dict keys with special characters in them can be constructed
     using the backtick quoting.
   type: Plugin
+  version: 2
   args:
   - name: url
     type: string
@@ -1895,7 +2226,7 @@
     description: A dict of headers to send.
   - name: method
     type: string
-    description: HTTP method to use (GET, POST)
+    description: HTTP method to use (GET, POST, PUT, PATCH, DELETE)
   - name: data
     type: string
     description: If specified we write this raw data into a POST request instead of
@@ -1904,6 +2235,9 @@
     type: int
     description: Read input with this chunk size and send each chunk as a row
   - name: disable_ssl_security
+    type: bool
+    description: Disable ssl certificate verifications (deprecated in favor of SkipVerify).
+  - name: skip_verify
     type: bool
     description: Disable ssl certificate verifications.
   - name: tempfile_extension
@@ -1917,7 +2251,12 @@
     type: string
     description: As a better alternative to disable_ssl_security, allows root ca certs
       to be added here.
+  - name: cookie_jar
+    type: ordereddict.Dict
+    description: A cookie jar to use if provided. This is a dict of cookie structures.
   category: plugin
+  metadata:
+    permissions: COLLECT_SERVER
 - name: humanize
   description: |
     Format items in human readable way.
@@ -1964,7 +2303,6 @@
   - name: description
     type: string
     description: Description of the hunt
-    required: true
   - name: artifacts
     type: string
     description: A list of artifacts to collect
@@ -2005,7 +2343,16 @@
     type: string
     description: If specified exclude these labels
     repeated: true
+  - name: os
+    type: string
+    description: If specified target this OS
+  - name: org_id
+    type: string
+    description: If set the collection will be started in the specified orgs.
+    repeated: true
   category: server
+  metadata:
+    permissions: START_HUNT,ORG_ADMIN
 - name: hunt_add
   description: |
     Assign a client to a hunt.
@@ -2046,7 +2393,12 @@
     type: string
     description: If a flow id is specified we do not create a new flow, but instead
       add this flow_id to the hunt.
+  - name: relaunch
+    type: bool
+    description: If specified we relaunch the hunt on this client again.
   category: server
+  metadata:
+    permissions: START_HUNT
 - name: hunt_delete
   description: 'Delete a hunt. '
   type: Plugin
@@ -2056,6 +2408,8 @@
     required: true
   - name: really_do_it
     type: bool
+  metadata:
+    permissions: SERVER_ADMIN
 - name: hunt_flows
   description: |
     Retrieve the flows launched by a hunt.
@@ -2078,6 +2432,8 @@
     type: int64
     description: Number of rows to show (used for paging).
   category: server
+  metadata:
+    permissions: READ_RESULTS
 - name: hunt_results
   description: |
     Retrieve the results of a hunt.
@@ -2103,6 +2459,27 @@
     type: bool
     description: If set we return less columns.
   category: server
+  metadata:
+    permissions: READ_RESULTS
+- name: hunt_update
+  description: Update a hunt.
+  type: Function
+  args:
+  - name: hunt_id
+    type: string
+    description: The hunt to update
+    required: true
+  - name: stop
+    type: bool
+    description: Stop the hunt
+  - name: start
+    type: bool
+    description: Start the hunt
+  - name: description
+    type: string
+    description: Update hunt description
+  metadata:
+    permissions: START_HUNT
 - name: hunts
   description: |
     Retrieve the list of hunts.
@@ -2111,7 +2488,15 @@
   - name: hunt_id
     type: string
     description: A hunt id to read, if not specified we list all of them.
+  - name: offset
+    type: uint64
+    description: Start offset.
+  - name: count
+    type: uint64
+    description: Max number of results to return.
   category: server
+  metadata:
+    permissions: READ_RESULTS
 - name: if
   description: |
     Conditional execution of query
@@ -2189,10 +2574,9 @@
     type: string
     description: Path on server to the collector zip.
     required: true
-  - name: accessor
-    type: string
-    description: The accessor to use
   category: server
+  metadata:
+    permissions: COLLECT_SERVER,FILESYSTEM_READ
 - name: info
   description: |
     Get information about the running host.
@@ -2205,6 +2589,8 @@
     certain OS or versions.
   type: Plugin
   category: plugin
+  metadata:
+    permissions: MACHINE_STATE
 - name: int
   description: |
     Truncate to an integer.
@@ -2221,6 +2607,8 @@
     List all active network interfaces using the API.
   type: Plugin
   category: windows
+  metadata:
+    permissions: MACHINE_STATE
 - name: inventory
   description: |
     Retrieve the tools inventory.
@@ -2252,13 +2640,17 @@
   - name: filename
     type: string
     description: The name of the file on the endpoint
-  - name: file
+  - name: version
     type: string
+  - name: file
+    type: accessors.OSPath
     description: An optional file to upload
   - name: accessor
     type: string
     description: The accessor to use to read the file.
   category: server
+  metadata:
+    permissions: SERVER_ADMIN
 - name: inventory_get
   description: Get tool info from inventory service.
   type: Function
@@ -2266,7 +2658,11 @@
   - name: tool
     type: string
     required: true
+  - name: version
+    type: string
   category: server
+  metadata:
+    permissions: SERVER_ADMIN
 - name: ip
   description: |
     Format an IP address.
@@ -2434,6 +2830,8 @@
     type: string
     required: true
   category: basic
+  metadata:
+    permissions: MACHINE_STATE
 - name: label
   description: |
     Add the labels to the client. If op is 'remove' then remove these labels.
@@ -2463,18 +2861,72 @@
     type: string
     description: An operation on the labels (set, check, remove)
   category: server
+  metadata:
+    permissions: LABEL_CLIENT
 - name: len
   description: Returns the length of an object.
   type: Function
   args:
   - name: list
     type: Any
-    description: A list of items too filter
+    description: A list of items to filter
     required: true
   category: basic
+- name: leveldb
+  description: Enumerate all items in a level db database
+  type: Plugin
+  args:
+  - name: file
+    type: accessors.OSPath
+    description: The path to the leveldb file.
+  - name: accessor
+    type: string
+    description: The accessor to use.
+  metadata:
+    permissions: FILESYSTEM_READ
 - name: log
-  description: Log the message.
+  description: |
+    Log the message and return TRUE.
+
+    The message will be logged into the query log stream (Viewable in
+    the Logs tab). The `message` parameter represents a format string
+    that will be expanded using the `args` parameter list if needed.
+
+    Since `log()` always returns TRUE it is easy to use in a WHERE
+    clause as a form of debugging (It is basically equivalent to the
+    print statement of other languages).
+
+    ```sql
+    SELECT * FROM glob(...)
+    WHERE log(message="Value of OSPath is %v", args=OSPath)
+    ```
+
+    ## Deduplication
+
+    Log messages will be deduped according to the `dedup`
+    parameter - each distinct format string will not be emitted more
+    frequently than the `dedup` parameter (by default 60 seconds).
+
+    This makes it safe to use `log()` frequently without overflowing
+    the logs stream.
+
+    ```vql
+    SELECT * FROM range(end=_value)
+    WHERE log(message="Value is %v", args=_value)
+    ```
+
+    Will only emit a single message due to the format string being
+    deduped.
+
+    This property makes it useful to add progress logging to long
+    running artifacts. The logs will be emitted every minute.
+
+    ```vql
+    SELECT * FROM glob(...)
+    WHERE log(message="Processing file %v", args=OSPath)
+    ```
   type: Function
+  version: 2
   args:
   - name: message
     type: string
@@ -2486,15 +2938,13 @@
   - name: args
     type: Any
     description: An array of elements to apply into the format string.
+  - name: level
+    type: string
+    description: Level to log at (DEFAULT, WARN, ERROR, INFO).
   category: basic
 - name: lookupSID
   description: Get information about the SID.
   type: Function
-  args:
-  - name: sid
-    type: string
-    description: 'A SID to lookup using LookupAccountSid '
-    required: true
   category: windows
 - name: lowcase
   type: Function
@@ -2504,6 +2954,38 @@
     description: A string to lower
     required: true
   category: basic
+- name: lru
+  description: |
+    Creates an LRU object
+
+    A LRU is like a dict, except that older items are expired. It is
+    useful to creating running lookup values without exceeding memory
+    constraints.
+
+    An example of this query is maintaining lookups between Kernel
+    objects and key names within the Windows Kernel Registry provider.
+
+    ```vql
+    LET Cache <= lru()
+
+    SELECT *, EventData,
+        get(item=Cache, field=EventData.KeyObject) AS KeyName
+    FROM watch_etw(guid="{70EB4F03-C1DE-4F73-A051-33D13D5413BD}")
+    WHERE if(
+       condition=System.ID = 2,  -- KeyOpen event
+       then=set(item=Cache,
+                field=EventData.KeyObject,
+                value=EventData.RelativeName),
+       else=TRUE)
+    ```
+
+    Note how `set()` can be used to add items to the cache and `get()`
+    is used to retrieve items.
+  type: Function
+  args:
+  - name: size
+    type: int64
+    description: Size of the LRU (default 1000)
 - name: lzxpress_decompress
   description: |
     Decompress an lzxpress blob.
@@ -2551,9 +3033,10 @@
     many files (e.g. in a glob) may result in substantial load on the
     endpoint.
   type: Function
+  version: 1
   args:
   - name: path
-    type: string
+    type: accessors.OSPath
     description: Path to open and hash.
     required: true
   - name: accessor
@@ -2566,6 +3049,56 @@
     type: string
     description: Additional magic to load
   category: plugin
+  metadata:
+    permissions: FILESYSTEM_READ
+- name: mail
+  description: Send Email to a remote server.
+  type: Function
+  args:
+  - name: to
+    type: string
+    description: Recipient of the mail
+    repeated: true
+    required: true
+  - name: from
+    type: string
+    description: The from email address.
+  - name: cc
+    type: string
+    description: A cc for the mail
+    repeated: true
+  - name: subject
+    type: string
+    description: The subject.
+  - name: body
+    type: string
+    description: The body of the mail.
+    required: true
+  - name: period
+    type: int64
+    description: How long to wait before sending the next mail - help to throttle
+      mails.
+  - name: server_port
+    type: uint64
+    description: The SMTP server port to use (default 587).
+  - name: server
+    type: string
+    description: The SMTP server to use (if not specified we try the config file).
+  - name: auth_username
+    type: string
+    description: The SMTP username we authenticate to the server.
+  - name: auth_password
+    type: string
+    description: The SMTP username password we use to authenticate to the server.
+  - name: skip_verify
+    type: bool
+    description: 'Skip SSL verification(default: False).'
+  - name: root_ca
+    type: string
+    description: As a better alternative to disable_ssl_security, allows root ca certs
+      to be added here.
+  metadata:
+    permissions: SERVER_ADMIN
 - name: mail
   description: Send Email to a remote server.
   type: Plugin
@@ -2593,7 +3126,6 @@
     type: int64
     description: How long to wait before sending the next mail - help to throttle
       mails.
-    required: true
   - name: server_port
     type: uint64
     description: The SMTP server port to use (default 587).
@@ -2606,6 +3138,13 @@
   - name: auth_password
     type: string
     description: The SMTP username password we use to authenticate to the server.
+  - name: skip_verify
+    type: bool
+    description: 'Skip SSL verification(default: False).'
+  - name: root_ca
+    type: string
+    description: As a better alternative to disable_ssl_security, allows root ca certs
+      to be added here.
   category: server
 - name: max
   description: |
@@ -2740,6 +3279,25 @@
     type: bool
     description: This call will clear previous mocks for this plugin
   category: utils
+- name: mock_clear
+  description: Resets all mocks.
+  type: Function
+- name: mock_replay
+  description: Replay recorded calls on a mock.
+  type: Function
+  args:
+  - name: plugin
+    type: string
+    description: The plugin to mock
+  - name: function
+    type: string
+    description: The function to mock
+  - name: expected_calls
+    type: int
+    description: How many times plugin should be called
+  - name: clear
+    type: bool
+    description: This call will clear previous mocks for this plugin
 - name: modules
   description: Enumerate Loaded DLLs.
   type: Plugin
@@ -2791,6 +3349,32 @@
     type: int64
     description: Maximum number of clients to fetch (default unlimited)'
   category: server
+  metadata:
+    permissions: READ_RESULTS
+- name: monitoring_logs
+  description: Retrieve log messages from client event monitoring for the specified
+    client id and artifact
+  type: Plugin
+  args:
+  - name: client_id
+    type: string
+    description: The client id to extract
+    required: true
+  - name: artifact
+    type: string
+    description: The name of the artifact collection to fetch
+    required: true
+  - name: source
+    type: string
+    description: An optional named source within the artifact
+  - name: start_time
+    type: Any
+    description: Start return events from this date (for event sources)
+  - name: end_time
+    type: Any
+    description: Stop end events reach this time (event sources).
+  metadata:
+    permissions: READ_RESULTS
 - name: netcat
   description: Make a tcp connection and read data from a socket.
   type: Plugin
@@ -2816,6 +3400,8 @@
     type: int
     description: Seconds to wait before retry - default 0 - do not retry
   category: plugin
+  metadata:
+    permissions: COLLECT_SERVER
 - name: netstat
   description: Collect network information.
   type: Plugin
@@ -2830,6 +3416,8 @@
   - name: really_do_it
     type: bool
   category: server
+  metadata:
+    permissions: SERVER_ADMIN
 - name: now
   description: Returns current time in seconds since epoch.
   type: Function
@@ -2849,7 +3437,7 @@
   type: Plugin
   args:
   - name: file
-    type: string
+    type: accessors.OSPath
     description: A list of filenames to open as OLE files.
     repeated: true
     required: true
@@ -2860,6 +3448,40 @@
     type: int64
     description: Maximum size of file we load into memory.
   category: parsers
+  metadata:
+    permissions: FILESYSTEM_READ
+- name: org
+  description: Return the details of the current org.
+  type: Function
+- name: org_create
+  description: Creates a new organization.
+  type: Function
+  args:
+  - name: name
+    type: string
+    description: The name of the org.
+    required: true
+  - name: org_id
+    type: string
+    description: An ID for the new org (if not set use a random ID).
+  metadata:
+    permissions: ORG_ADMIN
+- name: org_delete
+  description: Deletes an Org from the server.
+  type: Function
+  args:
+  - name: org
+    type: string
+    description: The org ID to delete.
+    required: true
+  - name: really_do_it
+    type: bool
+    description: If not specified, just show what org will be removed
+  metadata:
+    permissions: ORG_ADMIN
+- name: orgs
+  description: Retrieve the list of orgs on this server.
+  type: Plugin
 - name: parallelize
   description: |
     Runs query on result batches in parallel.
@@ -2934,12 +3556,14 @@
     type: int64
     description: Number of rows in each batch.)
   category: server
+  metadata:
+    permissions: READ_RESULTS
 - name: parse_auditd
   description: Parse log files generated by auditd.
   type: Plugin
   args:
   - name: filename
-    type: string
+    type: accessors.OSPath
     description: A list of log files to parse.
     repeated: true
     required: true
@@ -2992,6 +3616,8 @@
     type: int64
     description: Start parsing from this offset
   category: parsers
+  metadata:
+    permissions: FILESYSTEM_READ
 - name: parse_csv
   description: |
     Parses events from a CSV file.
@@ -3024,7 +3650,7 @@
   type: Plugin
   args:
   - name: filename
-    type: string
+    type: accessors.OSPath
     description: CSV files to open
     repeated: true
     required: true
@@ -3045,12 +3671,14 @@
     description: The columns to use
     repeated: true
   category: parsers
+  metadata:
+    permissions: FILESYSTEM_READ
 - name: parse_ese
   description: Opens an ESE file and dump a table.
   type: Plugin
   args:
   - name: file
-    type: string
+    type: accessors.OSPath
     required: true
   - name: accessor
     type: string
@@ -3060,17 +3688,21 @@
     description: A table name to dump
     required: true
   category: parsers
+  metadata:
+    permissions: FILESYSTEM_READ
 - name: parse_ese_catalog
   description: Opens an ESE file and dump the schema.
   type: Plugin
   args:
   - name: file
-    type: string
+    type: accessors.OSPath
     required: true
   - name: accessor
     type: string
     description: The accessor to use.
   category: parsers
+  metadata:
+    permissions: FILESYSTEM_READ
 - name: parse_evtx
   description: |
     Parses events from an EVTX file.
@@ -3100,7 +3732,7 @@
   type: Plugin
   args:
   - name: filename
-    type: string
+    type: accessors.OSPath
     description: A list of event log files to parse.
     repeated: true
     required: true
@@ -3111,6 +3743,8 @@
     type: string
     description: A Message database from https://github.com/Velocidex/evtx-data.
   category: parsers
+  metadata:
+    permissions: FILESYSTEM_READ
 - name: parse_float
   description: Convert a string to a float.
   type: Function
@@ -3161,19 +3795,21 @@
   type: Plugin
   args:
   - name: filename
-    type: string
+    type: accessors.OSPath
     description: JSON file to open
     required: true
   - name: accessor
     type: string
     description: The accessor to use
   category: parsers
+  metadata:
+    permissions: FILESYSTEM_READ
 - name: parse_lines
   description: Parse a file separated into lines.
   type: Plugin
   args:
   - name: filename
-    type: string
+    type: accessors.OSPath
     description: A list of log files to parse.
     repeated: true
     required: true
@@ -3184,6 +3820,8 @@
     type: int
     description: Maximum size of line buffer.
   category: parsers
+  metadata:
+    permissions: FILESYSTEM_READ
 - name: parse_mft
   description: |
     Scan the $MFT from an NTFS volume.
@@ -3208,15 +3846,24 @@
          accessor="raw_ntfs")
     ```
   type: Plugin
+  version: 2
   args:
   - name: filename
-    type: string
+    type: accessors.OSPath
     description: The MFT file.
     required: true
   - name: accessor
     type: string
     description: The accessor to use.
+  - name: prefix
+    type: accessors.OSPath
+    description: If specified we prefix all paths with this path.
+  - name: start
+    type: int64
+    description: The first entry to scan.
   category: parsers
+  metadata:
+    permissions: FILESYSTEM_READ
 - name: parse_ntfs
   description: |
     Parse specific inodes from an NTFS image file or the raw device.
@@ -3326,7 +3973,12 @@
   - name: accessor
     type: string
     description: The accessor to use.
+  - name: base_offset
+    type: int64
+    description: The offset in the file for the base address.
   category: parsers
+  metadata:
+    permissions: FILESYSTEM_READ
 - name: parse_pkcs7
   description: Parse a DER encoded pkcs7 string into an object.
   type: Function
@@ -3411,7 +4063,7 @@
   type: Plugin
   args:
   - name: file
-    type: string
+    type: accessors.OSPath
     description: A list of files to parse.
     repeated: true
     required: true
@@ -3427,12 +4079,14 @@
     type: int
     description: Maximum size of line buffer (default 64kb).
   category: parsers
+  metadata:
+    permissions: FILESYSTEM_READ
 - name: parse_recyclebin
   description: Parses a $I file found in the $Recycle.Bin
   type: Plugin
   args:
   - name: filename
-    type: string
+    type: accessors.OSPath
     description: Files to be parsed.
     repeated: true
     required: true
@@ -3440,6 +4094,8 @@
     type: string
     description: The accessor to use.
   category: parsers
+  metadata:
+    permissions: FILESYSTEM_READ
 - name: parse_string_with_regex
   description: Parse a string with a set of regex and extract fields. Returns a dict
     with fields populated from all regex capture variables.
@@ -3485,25 +4141,29 @@
   type: Function
   args:
   - name: file
-    type: string
+    type: accessors.OSPath
     description: XML file to open.
     required: true
   - name: accessor
     type: string
     description: The accessor to use
   category: parsers
+  metadata:
+    permissions: FILESYSTEM_READ
 - name: parse_yaml
   description: Parse yaml into an object.
   type: Function
   args:
   - name: filename
-    type: string
+    type: accessors.OSPath
     description: Yaml Filename
     required: true
   - name: accessor
     type: string
     description: File accessor
   category: parsers
+  metadata:
+    permissions: FILESYSTEM_READ
 - name: partitions
   description: List all partitions
   type: Plugin
@@ -3512,6 +4172,18 @@
     type: bool
     description: If specified list all Partitions
   category: windows
+- name: passwd
+  description: Updates the user's password.
+  type: Function
+  args:
+  - name: user
+    type: string
+    description: The user to set password for. If not set, changes the current user's
+      password.
+  - name: password
+    type: string
+    description: The new password to set.
+    required: true
 - name: patch
   description: |
     Patch a JSON object with a json patch or merge.
@@ -3596,6 +4268,7 @@
 - name: pathspec
   description: Create a structured path spec to pass to certain accessors.
   type: Function
+  version: 1
   args:
   - name: DelegateAccessor
     type: string
@@ -3612,7 +4285,29 @@
   - name: path_type
     type: string
     description: Type of path this is (windows,linux,registry,ntfs).
+  - name: accessor
+    type: string
+    description: The accessor to use to parse the path with
   category: plugin
+- name: pe_dump
+  description: Dump a PE file from process memory.
+  type: Function
+  args:
+  - name: pid
+    type: uint64
+    description: The pid to dump.
+    required: true
+  - name: base_offset
+    type: int64
+    description: The offset in the file for the base address.
+    required: true
+  - name: in_memory
+    type: uint64
+    description: By default we store to a tempfile and return the path. If this option
+      is larger than 0, we prepare the file in a memory buffer at the specified limit,
+      to avoid AV alerts on disk access.
+  metadata:
+    permissions: MACHINE_STATE
 - name: pipe
   description: |
     A pipe allows plugins that use files to read data from a vql
@@ -3655,24 +4350,64 @@
     description: 'The separator that will be used to split each read (default: no
       separator will be used)'
   category: plugin
+- name: pk_decrypt
+  description: Decrypt files using pubkey encryption
+  type: Function
+  args:
+  - name: data
+    type: string
+    description: The data to decrypt
+    required: true
+  - name: signing_key
+    type: string
+    description: Public key to verify signature
+  - name: private_key
+    type: string
+    description: Private key to decrypt with. Defaults to server private key
+  - name: scheme
+    type: string
+    description: 'Encryption scheme to use. Defaults to RSA. Currently supported:
+      PGP,RSA'
+- name: pk_encrypt
+  description: Encrypt files using pubkey encryption
+  type: Function
+  args:
+  - name: data
+    type: string
+    description: The data to encrypt
+    required: true
+  - name: signing_key
+    type: string
+    description: Private key to sign with
+  - name: public_key
+    type: string
+    description: Public key to encrypt with. Defaults to server public key
+  - name: scheme
+    type: string
+    description: 'Encryption scheme to use. Defaults to X509. Currently supported:
+      PGP,X509'
+  metadata:
+    permissions: SERVER_ADMIN
 - name: plist
   description: Parse plist file
   type: Function
   args:
   - name: file
-    type: string
+    type: accessors.OSPath
     description: A list of files to parse.
     required: true
   - name: accessor
     type: string
     description: The accessor to use.
   category: parsers
+  metadata:
+    permissions: FILESYSTEM_READ
 - name: plist
   description: Parses a plist file.
   type: Plugin
   args:
   - name: file
-    type: string
+    type: accessors.OSPath
     description: A list of files to parse.
     repeated: true
     required: true
@@ -3680,12 +4415,14 @@
     type: string
     description: The accessor to use.
   category: parsers
+  metadata:
+    permissions: FILESYSTEM_READ
 - name: prefetch
   description: Parses a prefetch file.
   type: Plugin
   args:
   - name: filename
-    type: string
+    type: accessors.OSPath
     description: A list of event log files to parse.
     repeated: true
     required: true
@@ -3693,6 +4430,8 @@
     type: string
     description: The accessor to use.
   category: parsers
+  metadata:
+    permissions: FILESYSTEM_READ
 - name: proc_dump
   description: |
     Dumps process memory.
@@ -3737,7 +4476,84 @@
   - name: key
     type: string
     description: If set use this key to cache the  yara rules.
+  - name: namespace
+    type: string
+    description: The Yara namespece to use.
+  - name: vars
+    type: ordereddict.Dict
+    description: The Yara variables to use.
+  - name: number
+    type: int64
+    description: Stop after this many hits (1).
   category: windows
+  metadata:
+    permissions: MACHINE_STATE
+- name: process_tracker
+  description: Install a global process tracker.
+  type: Function
+  args:
+  - name: sync_query
+    type: StoredQuery
+    description: Source for full tracker updates. Query must emit rows with the ProcessTrackerUpdate
+      shape - usually uses pslist() to form a full sync.
+  - name: sync_period
+    type: int64
+    description: How often to do a full sync (default 5000 msec).
+  - name: update_query
+    type: StoredQuery
+    description: An Event query that produces live updates of the tracker state.
+  - name: max_size
+    type: int64
+    description: Maximum size of process tracker LRU.
+  - name: enrichments
+    type: string
+    description: One or more VQL lambda functions that can enrich the data for the
+      process.
+    repeated: true
+- name: process_tracker_all
+  description: Get all processes stored in the tracker.
+  type: Function
+- name: process_tracker_callchain
+  description: Get a call chain from the global process tracker.
+  type: Function
+  args:
+  - name: id
+    type: string
+    description: Process ID.
+    required: true
+- name: process_tracker_children
+  description: Get all children of a process.
+  type: Function
+  args:
+  - name: id
+    type: string
+    description: Process ID.
+    required: true
+- name: process_tracker_get
+  description: Get a single process from the global tracker.
+  type: Function
+  args:
+  - name: id
+    type: string
+    description: Process ID.
+    required: true
+- name: process_tracker_pslist
+  description: List all processes from the process tracker.
+  type: Plugin
+- name: process_tracker_tree
+  description: Get the full process tree under the process id.
+  type: Function
+  args:
+  - name: id
+    type: string
+    description: Process ID.
+  - name: data_callback
+    type: vfilter.Lambda
+    description: A VQL Lambda function to that receives a ProcessEntry and returns
+      the data node for each process.
+- name: process_tracker_updates
+  description: Get the process tracker update events from the global process tracker.
+  type: Plugin
 - name: profile
   description: Returns a profile dump from the running process.
   type: Plugin
@@ -3779,6 +4595,18 @@
     type: int64
     description: Duration of samples (default 30 sec)
   category: plugin
+  metadata:
+    permissions: MACHINE_STATE
+- name: pskill
+  description: Kill the specified process.
+  type: Function
+  args:
+  - name: pid
+    type: int64
+    description: A pid to kill.
+    required: true
+  metadata:
+    permissions: EXECVE
 - name: pslist
   description: |
     Enumerate running processes.
@@ -3794,6 +4622,8 @@
     description: A pid to list. If this is provided we are able to operate much faster
       by only opening a single process.
   category: plugin
+  metadata:
+    permissions: MACHINE_STATE
 - name: query
   description: Launch a subquery and materialize it into a list of rows.
   type: Function
@@ -3819,10 +4649,22 @@
   - name: iops_limit
     type: float64
     description: Average IOPs to target.
+  - name: timeout
+    type: float64
+    description: Cancel the query after this many seconds
   - name: progress_timeout
     type: float64
     description: If no progress is detected in this many seconds, we terminate the
       query and output debugging information
+  - name: org_id
+    type: string
+    description: If specified, the query will run in the specified org space (Use
+      'root' to refer to the root org)
+  - name: runas
+    type: string
+    description: If specified, the query will run as the specified user
+  metadata:
+    permissions: IMPERSONATION
 - name: rand
   description: Selects a random number.
   type: Function
@@ -3878,13 +4720,15 @@
     type: int64
     description: Where to read from the file.
   - name: filename
-    type: string
+    type: accessors.OSPath
     description: One or more files to open.
     required: true
   - name: accessor
     type: string
     description: An accessor to use.
   category: basic
+  metadata:
+    permissions: FILESYSTEM_READ
 - name: read_file
   description: |
     Read files in chunks.
@@ -3904,7 +4748,7 @@
     type: int
     description: Max length of the file to read.
   - name: filenames
-    type: string
+    type: accessors.OSPath
     description: One or more files to open.
     repeated: true
     required: true
@@ -3912,6 +4756,8 @@
     type: string
     description: An accessor to use.
   category: plugin
+  metadata:
+    permissions: FILESYSTEM_READ
 - name: read_reg_key
   description: |
     This is a convenience plugin which applies the globs to the registry
@@ -3927,12 +4773,11 @@
     type: string
     description: Glob expressions to apply.
     repeated: true
-    required: true
   - name: accessor
     type: string
     description: The accessor to use.
   - name: root
-    type: string
+    type: accessors.OSPath
     description: The root directory to glob from (default '/').
   category: windows
 - name: reg_rm_key
@@ -3985,7 +4830,9 @@
   - name: replace
     type: string
     description: The substitute string.
-    required: true
+  - name: replace_lambda
+    type: string
+    description: Optionally the replacement can be a lambda.
   - name: re
     type: string
     description: A regex to apply
@@ -4025,6 +4872,8 @@
   - name: wait
     type: int64
     description: Wait this long before rekeying the client.
+  metadata:
+    permissions: EXECVE
 - name: relpath
   description: Return the relative path of .
   type: Function
@@ -4056,6 +4905,37 @@
   - name: clear
     type: bool
     description: If set we clear all accessors from the device manager
+- name: repack
+  description: Repack and upload a repacked binary or MSI to the server.
+  type: Function
+  args:
+  - name: target
+    type: string
+    description: The name of the target OS to repack (VelociraptorWindows, VelociraptorLinux,
+      VelociraptorDarwin)
+  - name: version
+    type: string
+    description: Velociraptor Version to repack
+  - name: exe
+    type: accessors.OSPath
+    description: Alternative a path to the executable to repack
+  - name: accessor
+    type: string
+    description: The accessor to use to read the file.
+  - name: binaries
+    type: string
+    description: List of tool names that will be repacked into the target
+    repeated: true
+  - name: config
+    type: string
+    description: The config to be repacked in the form of a json or yaml string
+    required: true
+  - name: upload_name
+    type: string
+    description: The name of the upload to create
+    required: true
+  metadata:
+    permissions: COLLECT_SERVER
 - name: rm
   description: Remove a file from the filesystem using the API.
   type: Function
@@ -4065,6 +4945,8 @@
     description: Filename to remove.
     required: true
   category: plugin
+  metadata:
+    permissions: FILESYSTEM_WRITE
 - name: rm_client_monitoring
   description: Remove an artifact from the client monitoring table.
   type: Function
@@ -4080,6 +4962,8 @@
     type: string
     description: Add this artifact to this label group (default all)
   category: server
+  metadata:
+    permissions: COLLECT_CLIENT
 - name: rm_server_monitoring
   description: Remove an artifact from the server monitoring table.
   type: Function
@@ -4092,6 +4976,8 @@
     type: LazyExpr
     description: A dict of artifact parameters
   category: server
+  metadata:
+    permissions: COLLECT_SERVER
 - name: rot13
   description: Apply rot13 deobfuscation to the string.
   type: Function
@@ -4130,7 +5016,7 @@
     ### Example
 
     ```sql
-    SELECT 1+1 As Two FROM scop()
+    SELECT 1+1 As Two FROM scope()
     ```
   type: Plugin
   category: plugin
@@ -4152,6 +5038,8 @@
     description: The row to send to the artifact
     required: true
   category: event
+  metadata:
+    permissions: SERVER_ADMIN,PUBLISH
 - name: sequence
   description: |
     Combines the output of many queries into an in memory fifo. After
@@ -4208,6 +5096,11 @@
     type: string
     description: Encoding format (csv,json,yaml,hex,base64)
   category: basic
+- name: server_frontend_cert
+  description: Get Server Frontend Certificate
+  type: Function
+  metadata:
+    permissions: MACHINE_STATE
 - name: server_metadata
   description: Returns client metadata from the datastore. Client metadata is a set
     of free form key/value data
@@ -4217,6 +5110,8 @@
     type: string
     required: true
   category: server
+  metadata:
+    permissions: SERVER_ADMIN
 - name: server_set_metadata
   description: |
     Sets server metadata. Server metadata is a set of free form
@@ -4240,9 +5135,11 @@
   args:
   - name: item
     type: Any
+    description: A dict to set
     required: true
   - name: field
     type: string
+    description: The field to set
     required: true
   - name: value
     type: Any
@@ -4257,6 +5154,8 @@
     description: The Value to set
     required: true
   category: server
+  metadata:
+    permissions: COLLECT_CLIENT
 - name: set_server_monitoring
   description: Sets the current server monitoring state.
   type: Function
@@ -4266,6 +5165,8 @@
     description: The Value to set
     required: true
   category: server
+  metadata:
+    permissions: COLLECT_SERVER
 - name: sleep
   description: Sleep for the specified number of seconds. Always returns true.
   type: Function
@@ -4345,6 +5246,8 @@
     type: int64
     description: Maximum number of clients to fetch (default unlimited)'
   category: server
+  metadata:
+    permissions: READ_RESULTS
 - name: split
   description: Splits a string into an array based on a regexp separator.
   type: Function
@@ -4365,7 +5268,7 @@
   type: Plugin
   args:
   - name: filenames
-    type: string
+    type: accessors.OSPath
     description: Files to parse.
     repeated: true
     required: true
@@ -4374,8 +5277,7 @@
     description: The accessor to use
   - name: regex
     type: string
-    description: The split regular expression (e.g. a comma)
-    required: true
+    description: The split regular expression (e.g. a comma, default whitespace)
   - name: columns
     type: string
     description: If the first row is not the headers, this arg must provide a list
@@ -4387,7 +5289,15 @@
   - name: count
     type: int
     description: Only split into this many columns if possible.
+  - name: record_regex
+    type: string
+    description: 'A regex to split data into records (default '
+  - name: buffer_size
+    type: int
+    description: Maximum size of line buffer (default 64kb).
   category: parsers
+  metadata:
+    permissions: FILESYSTEM_READ
 - name: splunk_upload
   description: Upload rows to splunk.
   type: Plugin
@@ -4423,12 +5333,23 @@
     description: 'Skip SSL verification(default: False).'
   - name: root_ca
     type: string
-    description: As a better alternative to disable_ssl_security, allows root ca certs
-      to be added here.
+    description: As a better alternative to skip_verify, allows root ca certs to be
+      added here.
   - name: wait_time
     type: int64
     description: Batch splunk upload this long (2 sec).
+  - name: hostname
+    type: string
+    description: Hostname for Splunk Events. Defaults to server hostname.
+  - name: timestamp_field
+    type: string
+    description: Field to use as event timestamp.
+  - name: hostname_field
+    type: string
+    description: Field to use as event hostname. Overrides hostname parameter.
   category: server
+  metadata:
+    permissions: COLLECT_SERVER
 - name: sql
   description: Run queries against sqlite, mysql, and postgres databases
   type: Plugin
@@ -4452,6 +5373,8 @@
   - name: args
     type: Any
   category: plugin
+  metadata:
+    permissions: FILESYSTEM_READ
 - name: sqlite
   description: Opens an SQLite file and run a query against it.
   type: Plugin
@@ -4473,7 +5396,7 @@
   type: Function
   args:
   - name: file
-    type: string
+    type: accessors.OSPath
     required: true
   - name: accessor
     type: string
@@ -4525,16 +5448,18 @@
 - name: stat
   description: Get file information. Unlike glob() this does not support wildcards.
   type: Plugin
+  version: 2
   args:
   - name: filename
-    type: string
+    type: accessors.OSPath
     description: One or more files to open.
-    repeated: true
     required: true
   - name: accessor
     type: string
     description: An accessor to use.
   category: plugin
+  metadata:
+    permissions: FILESYSTEM_READ
 - name: str
   description: Normalize a String.
   type: Function
@@ -4555,6 +5480,9 @@
   - name: prefix
     type: string
     description: The prefix to strip
+  - name: suffix
+    type: string
+    description: The suffix to strip
   category: basic
 - name: substr
   description: Create a substring from a string
@@ -4592,6 +5520,8 @@
     type: bool
     description: If set we delay removal as much as possible.
   category: basic
+  metadata:
+    permissions: FILESYSTEM_WRITE
 - name: tempfile
   description: |
     Create a temporary file and write some data into it.
@@ -4613,6 +5543,8 @@
     type: bool
     description: If set we delay removal as much as possible.
   category: plugin
+  metadata:
+    permissions: FILESYSTEM_WRITE
 - name: timeline
   description: Read a timeline. You can create a timeline with the timeline_add()
     function
@@ -4633,6 +5565,8 @@
     type: string
     description: The notebook ID the timeline is stored in.
   category: server
+  metadata:
+    permissions: READ_RESULTS
 - name: timeline_add
   description: Add a new query to a timeline.
   type: Function
@@ -4657,6 +5591,8 @@
     type: string
     description: The notebook ID the timeline is stored in.
   category: server
+  metadata:
+    permissions: READ_RESULTS
 - name: timestamp
   description: |
     Convert from different types to a time.Time.
@@ -4732,6 +5668,19 @@
     type: string
     description: A format specifier as per the Golang time.Parse
   category: basic
+- name: tlsh_hash
+  description: Calculate the tlsh hash of a file.
+  type: Function
+  args:
+  - name: path
+    type: accessors.OSPath
+    description: Path to open and hash.
+    required: true
+  - name: accessor
+    type: string
+    description: The accessor to use
+  metadata:
+    permissions: FILESYSTEM_READ
 - name: to_dict
   description: |
     Construct a dict from a query.
@@ -4782,6 +5731,10 @@
     description: The PID to get the token for.
     required: true
   category: windows
+- name: trace
+  description: Upload a trace file.
+  type: Function
+  version: 1
 - name: unhex
   description: |
     Apply hex decoding to the string.
@@ -4804,11 +5757,20 @@
     description: Hex string to decode
   category: basic
 - name: unzip
-  description: Unzips a file into a directory
+  description: |
+    Unzips a file into a directory.
+
+    This plugin supports a number of compression formats:
+    1. Zip files
+    2. Tar gz files.
+
+    The type of the file will be detected by the file extension, or
+    else you can force a type using the `type` parameter (`tgz` or
+    `zip`).
   type: Plugin
   args:
   - name: filename
-    type: string
+    type: accessors.OSPath
     description: File to unzip.
     required: true
   - name: accessor
@@ -4816,12 +5778,18 @@
     description: The accessor to use
   - name: filename_filter
     type: string
-    description: Only extract members matching this filter.
+    description: Only extract members matching this regex filter.
   - name: output_directory
     type: string
     description: Where to unzip to
     required: true
+  - name: type
+    type: string
+    description: The type of file (default autodetected from file extension - zip
+      or tgz or tar.gz).
   category: basic
+  metadata:
+    permissions: FILESYSTEM_WRITE,FILESYSTEM_READ
 - name: upcase
   type: Function
   args:
@@ -4840,11 +5808,11 @@
   type: Function
   args:
   - name: file
-    type: string
+    type: accessors.OSPath
     description: The file to upload
     required: true
   - name: name
-    type: string
+    type: accessors.OSPath
     description: The name of the file that should be stored on the server
   - name: accessor
     type: string
@@ -4862,6 +5830,8 @@
     type: Any
     description: Birth time to record
   category: plugin
+  metadata:
+    permissions: FILESYSTEM_READ
 - name: upload
   description: |
     Upload files to the server.
@@ -4886,17 +5856,37 @@
     type: Any
     description: Modified time to record
   category: plugin
+- name: upload_azure
+  description: Upload files to Azure Blob Storage Service.
+  type: Function
+  args:
+  - name: file
+    type: accessors.OSPath
+    description: The file to upload
+    required: true
+  - name: name
+    type: string
+    description: The name of the file that should be stored on the server
+  - name: accessor
+    type: string
+    description: The accessor to use
+  - name: sas_url
+    type: string
+    description: A SAS URL to use for upload to the container.
+    required: true
+  metadata:
+    permissions: FILESYSTEM_READ
 - name: upload_directory
   description: Upload a file to an upload directory. The final filename will be the
     output directory path followed by the filename path.
   type: Function
   args:
   - name: file
-    type: string
+    type: accessors.OSPath
     description: The file to upload
     required: true
   - name: name
-    type: string
+    type: accessors.OSPath
     description: Filename to be stored within the output directory
   - name: accessor
     type: string
@@ -4918,12 +5908,14 @@
     type: Any
     description: Birth time to set the output file.
   category: server
+  metadata:
+    permissions: FILESYSTEM_WRITE
 - name: upload_gcs
   description: Upload files to GCS.
   type: Function
   args:
   - name: file
-    type: string
+    type: accessors.OSPath
     description: The file to upload
     required: true
   - name: name
@@ -4945,12 +5937,14 @@
     description: The credentials to use
     required: true
   category: plugin
+  metadata:
+    permissions: FILESYSTEM_READ
 - name: upload_s3
   description: Upload files to S3.
   type: Function
   args:
   - name: file
-    type: string
+    type: accessors.OSPath
     description: The file to upload
     required: true
   - name: name
@@ -4979,16 +5973,27 @@
   - name: serversideencryption
     type: string
     description: The server side encryption method to use
+  - name: kmsencryptionkey
+    type: string
+    description: The server side KMS key to use
+  - name: s3uploadroot
+    type: string
+    description: Prefix for the S3 object
   - name: noverifycert
+    type: bool
+    description: Skip TLS Verification (deprecated in favor of SkipVerify)
+  - name: skip_verify
     type: bool
     description: Skip TLS Verification
   category: plugin
+  metadata:
+    permissions: FILESYSTEM_READ
 - name: upload_sftp
   description: Upload files to SFTP.
   type: Function
   args:
   - name: file
-    type: string
+    type: accessors.OSPath
     description: The file to upload
     required: true
   - name: name
@@ -5017,12 +6022,43 @@
     type: string
     description: Host key to verify. Blank to disable
   category: basic
+  metadata:
+    permissions: FILESYSTEM_READ
+- name: upload_smb
+  description: Upload files using the SMB file share protocol.
+  type: Function
+  args:
+  - name: file
+    type: accessors.OSPath
+    description: The file to upload
+    required: true
+  - name: name
+    type: accessors.OSPath
+    description: The name of the file that should be stored on the server
+  - name: accessor
+    type: string
+    description: The accessor to use
+  - name: username
+    type: string
+    description: The SMB username to login as (if not provided we use the SMB_CREDENTIALS
+      env)
+  - name: password
+    type: string
+    description: The SMB password to login as (if not provided we use the SMB_CREDENTIALS
+      env)
+  - name: server_address
+    type: string
+    description: The SMB server address and optionally port followed by the share
+      name (e.g. \\192.168.1.1:445\ShareName)
+    required: true
+  metadata:
+    permissions: FILESYSTEM_READ
 - name: upload_webdav
   description: Upload files to a WebDAV server.
   type: Function
   args:
   - name: file
-    type: string
+    type: accessors.OSPath
     description: The file to upload
     required: true
   - name: name
@@ -5043,8 +6079,13 @@
     description: The password to use in HTTP basic auth
   - name: noverifycert
     type: bool
+    description: Skip TLS Verification (deprecated in favor of SkipVerify)
+  - name: skip_verify
+    type: bool
     description: Skip TLS Verification
   category: basic
+  metadata:
+    permissions: FILESYSTEM_READ
 - name: uploads
   description: Retrieve information about a flow's uploads.
   type: Plugin
@@ -5055,7 +6096,12 @@
   - name: flow_id
     type: string
     description: A flow ID (client or server artifacts)
+  - name: hunt_id
+    type: string
+    description: A hunt ID
   category: server
+  metadata:
+    permissions: READ_RESULTS
 - name: url
   description: |
     Construct a URL or parse one.
@@ -5094,10 +6140,24 @@
   - name: fragment
     type: string
     description: The fragment
+  - name: query
+    type: Any
+    description: A dict representing a query string
   - name: parse
     type: string
     description: A url to parse
   category: basic
+- name: user
+  description: Retrieves information about the Velociraptor user.
+  type: Function
+  args:
+  - name: user
+    type: string
+    description: The user to create or update.
+    required: true
+  - name: org
+    type: string
+    description: The org under which we query the user's ACL.
 - name: user_create
   description: Creates a new user from the server, or updates their permissions or
     reset their password.
@@ -5105,13 +6165,21 @@
   args:
   - name: user
     type: string
+    description: The user to create or update.
     required: true
   - name: roles
     type: string
+    description: List of roles to give the user.
     repeated: true
     required: true
   - name: password
     type: string
+    description: A password to set for the user (If not using SSO this might be needed).
+  - name: orgs
+    type: string
+    description: One or more org IDs to grant access to. If empty we use the current
+      org.
+    repeated: true
   category: server
 - name: user_delete
   description: Deletes a user from the server.
@@ -5119,8 +6187,38 @@
   args:
   - name: user
     type: string
+    description: The user to delete.
     required: true
+  - name: orgs
+    type: string
+    description: If set we only delete from these orgs, otherwise we delete from the
+      current org.
+    repeated: true
+  - name: really_do_it
+    type: bool
+    description: If not specified, just show what user will be removed
   category: server
+- name: user_grant
+  description: Grants the user the specified roles.
+  type: Function
+  args:
+  - name: user
+    type: string
+    description: The user to create or update.
+    required: true
+  - name: roles
+    type: string
+    description: List of roles to give the user.
+    repeated: true
+  - name: orgs
+    type: string
+    description: One or more org IDs to grant access to. If not specified we use current
+      org
+    repeated: true
+  - name: policy
+    type: ordereddict.Dict
+    description: A dict of permissions to set (e.g. as obtained from the gui_users()
+      function).
 - name: users
   description: Display information about workstation local users. This is obtained
     through the NetUserEnum() API.
@@ -5183,12 +6281,36 @@
   - name: plugin
     type: string
   category: basic
+- name: vfs_ls
+  description: |
+    List directory and build a VFS object.
+
+    This plugin is probably only useful as part of the
+    System.VFS.ListDirectory artifact.
+  type: Plugin
+  version: 1
+  args:
+  - name: path
+    type: accessors.OSPath
+    description: The directory to refresh.
+  - name: components
+    type: string
+    description: Alternatively a list of path components can be given.
+    repeated: true
+  - name: accessor
+    type: string
+    description: An accessor to use.
+  - name: depth
+    type: int64
+    description: Depth of directory to list (default 0).
+  metadata:
+    permissions: FILESYSTEM_READ
 - name: watch_auditd
   description: Watch log files generated by auditd.
   type: Plugin
   args:
   - name: filename
-    type: string
+    type: accessors.OSPath
     description: A list of log files to parse.
     repeated: true
     required: true
@@ -5209,7 +6331,7 @@
   type: Plugin
   args:
   - name: filename
-    type: string
+    type: accessors.OSPath
     description: CSV files to open
     repeated: true
     required: true
@@ -5230,6 +6352,8 @@
     description: The columns to use
     repeated: true
   category: event
+  metadata:
+    permissions: FILESYSTEM_READ
 - name: watch_etw
   description: Watch for events from an ETW provider.
   type: Plugin
@@ -5269,7 +6393,7 @@
   type: Plugin
   args:
   - name: filename
-    type: string
+    type: accessors.OSPath
     description: A list of event log files to parse.
     repeated: true
     required: true
@@ -5280,6 +6404,8 @@
     type: string
     description: A Message database from https://github.com/Velocidex/evtx-data.
   category: event
+  metadata:
+    permissions: FILESYSTEM_READ
 - name: watch_monitoring
   description: |
     Watch clients' monitoring log. This is an event plugin. This
@@ -5290,12 +6416,14 @@
     type: string
     description: The artifact to watch
   category: event
+  metadata:
+    permissions: READ_RESULTS
 - name: watch_syslog
   description: 'Watch a syslog file and stream events from it. '
   type: Plugin
   args:
   - name: filename
-    type: string
+    type: accessors.OSPath
     description: A list of log files to parse.
     repeated: true
     required: true
@@ -5306,13 +6434,15 @@
     type: int
     description: Maximum size of line buffer.
   category: event
+  metadata:
+    permissions: FILESYSTEM_READ
 - name: watch_usn
   description: Watch the USN journal from a device.
   type: Plugin
   args:
   - name: device
-    type: accessors.OSPath
-    description: The device file to open.
+    type: string
+    description: The device file to open (as an NTFS device).
     required: true
   category: event
 - name: whoami
@@ -5382,6 +6512,25 @@
     description: query to write into the file.
     required: true
   category: plugin
+  metadata:
+    permissions: FILESYSTEM_WRITE
+- name: write_jsonl
+  description: Write a query into a JSONL file.
+  type: Plugin
+  args:
+  - name: filename
+    type: string
+    description: CSV files to open
+    required: true
+  - name: accessor
+    type: string
+    description: The accessor to use
+  - name: query
+    type: StoredQuery
+    description: query to write into the file.
+    required: true
+  metadata:
+    permissions: FILESYSTEM_WRITE
 - name: xor
   description: Apply xor to the string and key.
   type: Function
@@ -5400,7 +6549,7 @@
     Scan files using yara rules.
 
     The `yara()` plugin applies a signature consisting of multiple rules
-    across files. You can read more about [yara rules](https://yara.readthedocs.io/en/v3.4.0/writingrules.html). The
+    across files. You can read more about [yara rules](https://yara.readthedocs.io/en/v4.2.3/writingrules.html). The
     accessor is used to open the various files which allows this plugin to
     work across raw ntfs, zip members or indeed process memory.
 
@@ -5451,6 +6600,9 @@
     yara DSL and the following combinations are supported `wide`,
     `wide ascii`, `wide nocase`, `wide nocase ascii`.
 
+    This shorthand notation is less useful because recent Velociraptor
+    versions offer a context sensitive Yara rule editor in the GUI
+    (simply press ? to bring up a rule template).
 
     {{% notice note %}}
 
@@ -5458,6 +6610,24 @@
     scanning stops after one hit is found.
 
     {{% /notice %}}
+
+    ### Compatibility with yara rules.
+
+    The YARA engine supports a number of directives that bring in
+    unreasonably sized dependencies. Velociraptor's Yara integration
+    disables directive importing dependencies such as openssl and
+    libmagic. This means that some rule conditions do not work (for
+    example `pe.number_of_signatures`). Other condition are still
+    supported (e.g. `pe.imphash()`). You can usually find equivalents
+    to the Yara plugins in VQL plugins so rules can be rewritten to
+    avoid this limitation.
+
+    If you have a large number of rules, you may use the `yara-tools`
+    repository https://github.com/Velocidex/yara-tools to clean up the
+    rules and verify that they will work with Velociraptor's yara
+    engine. The tool will automatically remove rules that are
+    incompatible with Velociraptor and reduce the size of the rules by
+    removing metadata and extra fluff.
   type: Plugin
   args:
   - name: rules
@@ -5490,5 +6660,13 @@
   - name: key
     type: string
     description: If set use this key to cache the  yara rules.
+  - name: namespace
+    type: string
+    description: The Yara namespece to use.
+  - name: vars
+    type: ordereddict.Dict
+    description: The Yara variables to use.
   category: plugin
+  metadata:
+    permissions: FILESYSTEM_READ
 

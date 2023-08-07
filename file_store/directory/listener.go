@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io/ioutil"
 	"os"
+	"strings"
 	"sync"
 	"sync/atomic"
 
@@ -194,6 +195,10 @@ func (self *Listener) Close() {
 	}
 }
 
+func (self *Listener) FileBufferSize() int64 {
+	return self.file_buffer.PendingSize()
+}
+
 func (self *Listener) Debug() *ordereddict.Dict {
 	self.mu.Lock()
 	defer self.mu.Unlock()
@@ -239,6 +244,7 @@ func NewListener(
 		}
 
 		base_name := fmt.Sprintf("journal_%s_%s_", name, node_name)
+		base_name = strings.Replace(base_name, "/", "...", -1)
 		tmpfile, err := ioutil.TempFile("", base_name)
 		if err != nil {
 			return nil, err

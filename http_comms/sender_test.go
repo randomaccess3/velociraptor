@@ -1,6 +1,6 @@
 /*
-   Velociraptor - Hunting Evil
-   Copyright (C) 2019 Velocidex Innovations.
+   Velociraptor - Dig Deeper
+   Copyright (C) 2019-2022 Rapid7 Inc.
 
    This program is free software: you can redistribute it and/or modify
    it under the terms of the GNU Affero General Public License as published
@@ -26,15 +26,17 @@ import (
 	"testing"
 	"time"
 
-	errors "github.com/pkg/errors"
+	"github.com/go-errors/errors"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"golang.org/x/time/rate"
 	"www.velocidex.com/golang/velociraptor/config"
 	config_proto "www.velocidex.com/golang/velociraptor/config/proto"
 	crypto_proto "www.velocidex.com/golang/velociraptor/crypto/proto"
 	crypto_test "www.velocidex.com/golang/velociraptor/crypto/testing"
 	"www.velocidex.com/golang/velociraptor/executor"
 	"www.velocidex.com/golang/velociraptor/logging"
+	"www.velocidex.com/golang/velociraptor/responder"
 	"www.velocidex.com/golang/velociraptor/utils"
 	"www.velocidex.com/golang/velociraptor/vtesting"
 )
@@ -45,6 +47,8 @@ type MockHTTPConnector struct {
 	received  []string
 	connected bool
 	t         *testing.T
+
+	config_obj *config_proto.Config
 }
 
 func (self *MockHTTPConnector) GetCurrentUrl(handler string) string {
@@ -83,9 +87,10 @@ func (self *MockHTTPConnector) Post(ctx context.Context,
 	message_info, err := manager.Decrypt(data)
 	require.NoError(self.t, err)
 
-	message_info.IterateJobs(context.Background(),
-		func(ctx context.Context, item *crypto_proto.VeloMessage) {
+	message_info.IterateJobs(context.Background(), self.config_obj,
+		func(ctx context.Context, item *crypto_proto.VeloMessage) error {
 			self.received = append(self.received, item.Name)
+			return nil
 		})
 
 	return &bytes.Buffer{}, nil
@@ -138,14 +143,18 @@ func testRingBuffer(
 	// We use this to wait for messages to be delivered to the mock
 	mock_wg := &sync.WaitGroup{}
 
-	connector := &MockHTTPConnector{wg: mock_wg, t: t}
+	connector := &MockHTTPConnector{
+		config_obj: config_obj,
+		wg:         mock_wg,
+		t:          t}
 
 	// The connector is not connected initially.
 	connector.SetConnected(false)
 
 	sender, err := NewSender(
 		config_obj, connector, manager, exe, rb, nil, /* enroller */
-		logger, "Sender", "control", nil, &utils.RealClock{})
+		logger, "Sender", rate.NewLimiter(rate.Inf, 0),
+		"control", nil, &utils.RealClock{})
 	assert.NoError(t, err)
 
 	sender.Start(subctx, wg)
@@ -208,7 +217,8 @@ func TestSender(t *testing.T) {
 
 	// Make the ring buffer 10 bytes - this is enough for one
 	// message but no more.
-	rb := NewRingBuffer(config_obj, 10)
+	flow_manager := responder.NewFlowManager(ctx, config_obj)
+	rb := NewRingBuffer(config_obj, flow_manager, 10)
 	testRingBuffer(ctx, rb, config_obj, "0123456789", t)
 }
 
@@ -234,7 +244,8 @@ func TestSenderWithFileBuffer(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	rb, err := NewFileBasedRingBuffer(ctx, config_obj, logger)
+	flow_manager := responder.NewFlowManager(ctx, config_obj)
+	rb, err := NewFileBasedRingBuffer(ctx, config_obj, flow_manager, logger)
 	require.NoError(t, err)
 
 	testRingBuffer(ctx, rb, config_obj, "0123456789", t)

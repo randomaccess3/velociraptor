@@ -33,6 +33,10 @@ var (
 func SetupTest(t *testing.T) (string, string) {
 	t.Parallel()
 
+	if testing.Short() {
+		t.Skip("skipping test in short mode.")
+	}
+
 	mu.Lock()
 	defer mu.Unlock()
 
@@ -106,9 +110,11 @@ func TestAutoexec(t *testing.T) {
 
 	// Repack the config in the binary.
 	cmd := exec.Command(binary,
-		"config", "repack", config_file.Name(), exe.Name())
+		"config", "repack", config_file.Name(), exe.Name(), "-v")
 	out, err := cmd.CombinedOutput()
 	require.NoError(t, err, string(out))
+
+	os.Chmod(exe.Name(), 0755)
 
 	// Run the repacked binary with no args - it should run the
 	// `artifacts list` command.
@@ -189,7 +195,7 @@ func TestProgressTimeout(t *testing.T) {
 	// Make sure the query was cancelled quickly without running the
 	// full length of the sleep.
 	fmt.Printf("Now is %v started at %v\n", time.Now(), start)
-	assert.Less(t, int(time.Now().Unix()-start.Unix()), int(10))
+	assert.Less(t, int(time.Now().Unix()-start.Unix()), int(20))
 }
 
 const cpulimitDefinitions = `
@@ -229,7 +235,7 @@ func TestCPULimit(t *testing.T) {
 	assert.Regexp(t, "Starting collection of GoHard", string(out))
 
 	// Make sure the collection timed out and dumped the goroutines.
-	assert.Regexp(t, "Will throttle query to 5% of", string(out))
+	assert.Regexp(t, "Will throttle query to 5 percent of", string(out))
 }
 
 func TestBuildDeb(t *testing.T) {
@@ -250,13 +256,7 @@ func TestBuildDeb(t *testing.T) {
 	config_file.Write(out)
 	config_file.Close()
 
-	// Create a tempfile for the binary executable.
-	binary_file, err := ioutil.TempFile("", "binary")
-	assert.NoError(t, err)
-
-	defer os.Remove(binary_file.Name())
-	binary_file.Write([]byte("\x7f\x45\x4c\x46XXXXXXXXXX"))
-	binary_file.Close()
+	binary_file, _ := filepath.Abs("../artifacts/testdata/files/test.elf")
 
 	output_file, err := ioutil.TempFile("", "output*.deb")
 	assert.NoError(t, err)
@@ -265,10 +265,10 @@ func TestBuildDeb(t *testing.T) {
 
 	cmd = exec.Command(
 		binary, "--config", config_file.Name(),
-		"debian", "client", "--binary", binary_file.Name(),
+		"debian", "client", "--binary", binary_file,
 		"--output", output_file.Name())
-	_, err = cmd.Output()
-	require.NoError(t, err)
+	out, err = cmd.CombinedOutput()
+	require.NoError(t, err, string(out))
 
 	// Make sure the file is written
 	fd, err := os.Open(output_file.Name())
@@ -287,10 +287,10 @@ func TestBuildDeb(t *testing.T) {
 
 	cmd = exec.Command(
 		binary, "--config", config_file.Name(),
-		"debian", "server", "--binary", binary_file.Name(),
+		"debian", "server", "--binary", binary_file,
 		"--output", output_file.Name())
-	_, err = cmd.Output()
-	require.NoError(t, err)
+	out, err = cmd.Output()
+	require.NoError(t, err, string(out))
 
 	// Make sure the file is written
 	fd, err = os.Open(output_file.Name())
@@ -314,7 +314,7 @@ func TestGenerateConfigWithMerge(t *testing.T) {
 		binary, "config", "generate", "--merge",
 		`{"Client": {"nonce": "Foo", "writeback_linux": "some_location"}}`)
 	out, err := cmd.Output()
-	require.NoError(t, err)
+	require.NoError(t, err, string(out))
 
 	// Write the config to the tmp file
 	config_file_content := out
@@ -336,7 +336,7 @@ func TestGenerateConfigWithMerge(t *testing.T) {
 		"VELOCIRAPTOR_CONFIG=",
 	)
 	out, err = cmd.Output()
-	require.Error(t, err)
+	require.Error(t, err, string(out))
 
 	// Specify the config on the commandline - should load correctly
 	cmd = exec.Command(binary, "config", "show", "--config", config_file.Name())
@@ -344,7 +344,7 @@ func TestGenerateConfigWithMerge(t *testing.T) {
 		"VELOCIRAPTOR_CONFIG=",
 	)
 	out, err = cmd.Output()
-	require.NoError(t, err)
+	require.NoError(t, err, string(out))
 	require.Contains(t, string(out), "Foo")
 
 	// Specify the config in the environment
@@ -376,6 +376,8 @@ func TestGenerateConfigWithMerge(t *testing.T) {
 	cmd = exec.Command(binary, "config", "repack", config_file.Name(), exe.Name())
 	out, err = cmd.CombinedOutput()
 	require.NoError(t, err)
+
+	os.Chmod(exe.Name(), 0755)
 
 	// Run the repacked binary with invalid environ - config
 	// should come from embedded.
@@ -447,14 +449,17 @@ func TestShowConfigWithMergePatch(t *testing.T) {
 	// replaces the Nonce With Foo, then adds another server to the
 	// urls: Merges are done first, then patches.
 	cmd := exec.Command(
-		binary, "config", "show", "--config", config_file.Name(),
+		binary, "config", "show", "--config", config_file.Name(), "-v",
 		"--merge",
 		`{"Client": {"nonce": "Foo", "server_urls": ["https://192.168.1.11:8000/"]}}`,
 		"--patch",
 		`[{"op": "add", "path": "/Client/server_urls/0", "value": "https://SomeServer/"}]`,
 	)
 	out, err := cmd.Output()
-	require.NoError(t, err)
+	if err != nil {
+		fmt.Println(string(err.(*exec.ExitError).Stderr))
+	}
+	require.NoError(t, err, string(out))
 
 	// Try to load it now.
 	new_config := &config_proto.Config{}

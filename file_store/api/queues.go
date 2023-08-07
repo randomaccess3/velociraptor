@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/Velocidex/ordereddict"
+	"www.velocidex.com/golang/velociraptor/utils"
 )
 
 type QueueOptions struct {
@@ -27,10 +28,13 @@ type QueueManager interface {
 
 	PushEventRows(path_manager PathManager, rows []*ordereddict.Dict) error
 
-	PushEventJsonl(path_manager PathManager, jsonl []byte) error
+	PushEventJsonl(path_manager PathManager, jsonl []byte, row_count int) error
 
 	Watch(ctx context.Context, queue_name string, queue_options *QueueOptions) (
 		output <-chan *ordereddict.Dict, cancel func())
+
+	// Sets the clock for tests
+	SetClock(clock utils.Clock)
 }
 
 type ResultSetFileProperties struct {

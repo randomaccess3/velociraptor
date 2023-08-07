@@ -1,6 +1,6 @@
 /*
-   Velociraptor - Hunting Evil
-   Copyright (C) 2019 Velocidex Innovations.
+   Velociraptor - Dig Deeper
+   Copyright (C) 2019-2022 Rapid7 Inc.
 
    This program is free software: you can redistribute it and/or modify
    it under the terms of the GNU Affero General Public License as published
@@ -24,8 +24,8 @@ import (
 	"runtime/pprof"
 	"runtime/trace"
 
-	"github.com/Velocidex/survey"
-	errors "github.com/pkg/errors"
+	"github.com/AlecAivazis/survey/v2"
+	errors "github.com/go-errors/errors"
 	kingpin "gopkg.in/alecthomas/kingpin.v2"
 	"www.velocidex.com/golang/velociraptor/config"
 	config_proto "www.velocidex.com/golang/velociraptor/config/proto"
@@ -126,13 +126,16 @@ func main() {
 
 	// If no args are given check if there is an embedded config
 	// with autoexec.
-	if len(args) == 0 {
+	pre, post := splitArgs(args)
+	if len(pre) == 0 {
 		config_obj, err := new(config.Loader).WithVerbose(*verbose_flag).
 			WithEmbedded().LoadAndValidate()
 		if err == nil && config_obj.Autoexec != nil && config_obj.Autoexec.Argv != nil {
+			args = nil
 			for _, arg := range config_obj.Autoexec.Argv {
 				args = append(args, os.ExpandEnv(arg))
 			}
+			args = append(args, post...)
 			logging.Prelog("Autoexec with parameters: %v", args)
 		}
 	}
@@ -157,18 +160,25 @@ func main() {
 		WithTempdir(*tempdir_flag).
 		WithApiLoader(*api_config_path).
 		WithEnvApiLoader("VELOCIRAPTOR_API_CONFIG").
-		WithCustomValidator(maybe_unlock_api_config).
+		WithCustomValidator("Validator maybe_unlock_api_config",
+			maybe_unlock_api_config).
 		WithFileLoader(*config_path).
 		WithEmbedded().
 		WithEnvLoader("VELOCIRAPTOR_CONFIG").
-		WithConfigMutator(func(config_obj *config_proto.Config) error {
-			return mergeFlagConfig(config_obj, default_config)
-		}).
-		WithCustomValidator(initFilestoreAccessor).
-		WithCustomValidator(initDebugServer).
-		WithConfigMutator(applyMinionRole).
-		WithCustomValidator(applyAnalysisTarget).
-		WithLogFile(*logging_flag)
+		WithConfigMutator("Mutator mergeFlagConfig",
+			func(config_obj *config_proto.Config) error {
+				return mergeFlagConfig(config_obj, default_config)
+			}).
+		WithCustomValidator("validator: initFilestoreAccessor",
+			initFilestoreAccessor).
+		WithCustomValidator("validator: initDebugServer", initDebugServer).
+		WithCustomValidator("validator: timezone", initTimezone).
+		WithConfigMutator("Mutator: applyMinionRole", applyMinionRole).
+		WithCustomValidator("validator: applyAnalysisTarget",
+			applyAnalysisTarget).
+		WithConfigMutator("OverrideFlag", deprecatedOverride).
+		WithLogFile(*logging_flag).
+		WithConfigMutator("Mutator maybeAddDefinitionsDirectory", maybeAddDefinitionsDirectory)
 
 	if *trace_flag != "" {
 		f, err := os.Create(*trace_flag)
@@ -202,14 +212,37 @@ func makeDefaultConfigLoader() *config.Loader {
 		WithFileLoader(*config_path).
 		WithEmbedded().
 		WithEnvLoader("VELOCIRAPTOR_CONFIG").
-		WithConfigMutator(func(config_obj *config_proto.Config) error {
-			return mergeFlagConfig(config_obj, default_config)
-		}).
-		WithCustomValidator(initFilestoreAccessor).
-		WithCustomValidator(initDebugServer).
+		WithConfigMutator("Mutator mergeFlagConfig",
+			func(config_obj *config_proto.Config) error {
+				return mergeFlagConfig(config_obj, default_config)
+			}).
+		WithCustomValidator("validator: initFilestoreAccessor",
+			initFilestoreAccessor).
+		WithCustomValidator("validator: initDebugServer", initDebugServer).
+		WithCustomValidator("validator: timezone", initTimezone).
 		WithLogFile(*logging_flag).
-		WithOverride(*override_flag).
-		WithConfigMutator(applyMinionRole).
-		WithCustomValidator(ensureProxy).
-		WithCustomValidator(applyAnalysisTarget)
+		WithConfigMutator("OverrideFlag", deprecatedOverride).
+		WithConfigMutator("Mutator applyMinionRole", applyMinionRole).
+		WithCustomValidator("validator: ensureProxy", ensureProxy).
+		WithConfigMutator("Mutator applyAnalysisTarget", applyAnalysisTarget).
+		WithConfigMutator("Mutator maybeAddDefinitionsDirectory", maybeAddDefinitionsDirectory)
+}
+
+// Split the command line into args before the -- and after the --
+func splitArgs(args []string) (pre, post []string) {
+	seen := false
+	for _, arg := range args {
+		if arg == "--" {
+			seen = true
+			continue
+		}
+
+		if seen {
+			post = append(post, arg)
+		} else {
+			pre = append(pre, arg)
+		}
+	}
+
+	return pre, post
 }

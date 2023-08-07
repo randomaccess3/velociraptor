@@ -1,8 +1,8 @@
 // +build windows
 
 /*
-   Velociraptor - Hunting Evil
-   Copyright (C) 2019 Velocidex Innovations.
+   Velociraptor - Dig Deeper
+   Copyright (C) 2019-2022 Rapid7 Inc.
 
    This program is free software: you can redistribute it and/or modify
    it under the terms of the GNU Affero General Public License as published
@@ -28,6 +28,7 @@ package registry
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -35,7 +36,7 @@ import (
 	"time"
 
 	"github.com/Velocidex/ordereddict"
-	errors "github.com/pkg/errors"
+
 	"golang.org/x/sys/windows/registry"
 	"www.velocidex.com/golang/velociraptor/accessors"
 	"www.velocidex.com/golang/velociraptor/json"
@@ -357,7 +358,7 @@ func (self *RegFileSystemAccessor) LstatWithOSPath(
 	hive_key_path := ""
 	// Convert the path into an OS specific string
 	if len(full_path.Components) > 1 {
-		hive_key_path = strings.Join(full_path.Components, "\\")
+		hive_key_path = key_path.String()
 	}
 
 	key, err := registry.OpenKey(hive, hive_key_path,
@@ -368,7 +369,7 @@ func (self *RegFileSystemAccessor) LstatWithOSPath(
 		// Maybe its a value then - open the containing key
 		// and return a valueInfo
 		containing_key := key_path.Dirname()
-		containing_key_name := strings.Join(containing_key.Components, "\\")
+		containing_key_name := containing_key.String()
 		key, err := registry.OpenKey(hive, containing_key_name,
 			registry.READ|registry.QUERY_VALUE|
 				registry.WOW64_64KEY)

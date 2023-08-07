@@ -1,6 +1,6 @@
 /*
-   Velociraptor - Hunting Evil
-   Copyright (C) 2019 Velocidex Innovations.
+   Velociraptor - Dig Deeper
+   Copyright (C) 2019-2022 Rapid7 Inc.
 
    This program is free software: you can redistribute it and/or modify
    it under the terms of the GNU Affero General Public License as published
@@ -21,6 +21,7 @@ import (
 	"context"
 	"fmt"
 	"reflect"
+	"sort"
 	"strings"
 	"testing"
 
@@ -43,8 +44,14 @@ var pathComponentsTestFixture = []pathComponentsTestFixtureType{
 	{"foo", []_PathFilterer{
 		_LiteralComponent{"foo"},
 	}},
-	{"foo**5", []_PathFilterer{
-		_RecursiveComponent{`foo.*\z(?ms)`, 5},
+	// A ** has to start at the begining of the component, otherwise
+	// it is not considered a recursive component and just interpreted
+	// as a normal wild card.
+	{"foo**", []_PathFilterer{
+		&_RegexComponent{regexp: `foo.*.*\z(?ms)`},
+	}},
+	{"**5", []_PathFilterer{
+		_RecursiveComponent{`.*\z(?ms)`, 5},
 	}},
 	{"*.exe", []_PathFilterer{
 		&_RegexComponent{regexp: `.*\.exe\z(?ms)`},
@@ -113,6 +120,7 @@ var _GlobFixture = []struct {
 	{"Recursive matches zero or more", []string{"/usr/bin/X11/**/diff"}},
 	{"Recursive matches none at end", []string{"/bin/bash/**"}},
 	{"Match masked by two matches", []string{"/usr/bin", "/usr/*/diff"}},
+	{"Multiple globs matching same file", []string{"/bin/bash", "/bin/ba*"}},
 }
 
 func GetMockFileSystemAccessor() accessors.FileSystemAccessor {
@@ -177,7 +185,11 @@ func TestGlobWithContext(t *testing.T) {
 			accessors.MustNewLinuxOSPath("/"), // root
 			fs_accessor)
 		for row := range output_chan {
-			returned = append(returned, row.FullPath())
+			hit := row.(*GlobHit)
+			globs := hit.Globs()
+			sort.Strings(globs)
+			returned = append(returned,
+				fmt.Sprintf("%v Data: %v\n", hit.OSPath(), globs))
 		}
 
 		result.Set(fmt.Sprintf("%03d %s %s", idx, fixture.name,

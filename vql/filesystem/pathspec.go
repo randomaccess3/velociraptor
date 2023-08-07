@@ -18,6 +18,7 @@ type PathSpecArgs struct {
 	Path             vfilter.Any `vfilter:"optional,field=Path,doc=A path to open."`
 	Parse            string      `vfilter:"optional,field=parse,doc=Alternatively parse the pathspec from this string."`
 	Type             string      `vfilter:"optional,field=path_type,doc=Type of path this is (windows,linux,registry,ntfs)."`
+	Accessor         string      `vfilter:"optional,field=accessor,doc=The accessor to use to parse the path with"`
 }
 
 type PathSpecFunction struct{}
@@ -85,6 +86,18 @@ func (self *PathSpecFunction) Call(ctx context.Context,
 		}
 	}
 
+	if arg.Accessor != "" {
+		accessor, err := accessors.GetAccessor(arg.Accessor, scope)
+		if err != nil {
+			scope.Log("pathspec: %v", err)
+			return false
+		}
+		result, err := accessor.ParsePath(path_str)
+		if err == nil {
+			return result
+		}
+	}
+
 	result, err := accessors.ParsePath(path_str, arg.Type)
 	if err != nil {
 		scope.Log("pathspec: %v", err)
@@ -115,6 +128,7 @@ func (self *PathSpecFunction) Info(scope vfilter.Scope, type_map *vfilter.TypeMa
 		Name:    "pathspec",
 		Doc:     "Create a structured path spec to pass to certain accessors.",
 		ArgType: type_map.AddType(scope, &PathSpecArgs{}),
+		Version: 1,
 	}
 }
 

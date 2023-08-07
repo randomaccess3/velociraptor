@@ -1,6 +1,6 @@
 /*
-   Velociraptor - Hunting Evil
-   Copyright (C) 2019 Velocidex Innovations.
+   Velociraptor - Dig Deeper
+   Copyright (C) 2019-2022 Rapid7 Inc.
 
    This program is free software: you can redistribute it and/or modify
    it under the terms of the GNU Affero General Public License as published
@@ -18,18 +18,16 @@
 package authenticators
 
 import (
-	"errors"
 	"fmt"
 	"io"
 	"io/ioutil"
 	"net/http"
-	"time"
 
-	jwt "github.com/golang-jwt/jwt"
 	"github.com/sirupsen/logrus"
 	context "golang.org/x/net/context"
 	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/microsoft"
+	utils "www.velocidex.com/golang/velociraptor/api/utils"
 	config_proto "www.velocidex.com/golang/velociraptor/config/proto"
 	"www.velocidex.com/golang/velociraptor/constants"
 	"www.velocidex.com/golang/velociraptor/json"
@@ -43,23 +41,35 @@ type AzureUser struct {
 }
 
 type AzureAuthenticator struct {
-	config_obj    *config_proto.Config
-	authenticator *config_proto.Authenticator
+	config_obj       *config_proto.Config
+	authenticator    *config_proto.Authenticator
+	base, public_url string
 }
 
 // The URL that will be used to log in.
 func (self *AzureAuthenticator) LoginURL() string {
-	return self.config_obj.GUI.PublicUrl + "auth/azure/login"
+	return utils.Join(self.base, "/auth/azure/login")
 }
 
 func (self *AzureAuthenticator) IsPasswordLess() bool {
 	return true
 }
 
+func (self *AzureAuthenticator) RequireClientCerts() bool {
+	return false
+}
+
+func (self *AzureAuthenticator) AuthRedirectTemplate() string {
+	return self.authenticator.AuthRedirectTemplate
+}
+
 func (self *AzureAuthenticator) AddHandlers(mux *http.ServeMux) error {
-	mux.Handle("/auth/azure/login", self.oauthAzureLogin())
-	mux.Handle("/auth/azure/callback", self.oauthAzureCallback())
-	mux.Handle("/auth/azure/picture", self.oauthAzurePicture())
+	mux.Handle(utils.Join(self.base, "/auth/azure/login"),
+		IpFilter(self.config_obj, self.oauthAzureLogin()))
+	mux.Handle(utils.Join(self.base, "/auth/azure/callback"),
+		IpFilter(self.config_obj, self.oauthAzureCallback()))
+	mux.Handle(utils.Join(self.base, "/auth/azure/picture"),
+		IpFilter(self.config_obj, self.oauthAzurePicture()))
 	return nil
 }
 
@@ -76,7 +86,8 @@ func (self *AzureAuthenticator) AuthenticateUserHandler(
 		self.config_obj,
 		func(w http.ResponseWriter, r *http.Request, err error, username string) {
 			reject_with_username(self.config_obj, w, r, err, username,
-				"/auth/azure/login", "Microsoft O365/Azure AD")
+				utils.Join(self.base, "/auth/azure/login"),
+				"Microsoft O365/Azure AD")
 		},
 		parent)
 }
@@ -84,7 +95,8 @@ func (self *AzureAuthenticator) AuthenticateUserHandler(
 func (self *AzureAuthenticator) oauthAzureLogin() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var azureOauthConfig = &oauth2.Config{
-			RedirectURL:  self.config_obj.GUI.PublicUrl + "auth/azure/callback",
+			RedirectURL: utils.Join(self.public_url, self.base,
+				"/auth/azure/callback"),
 			ClientID:     self.authenticator.OauthClientId,
 			ClientSecret: self.authenticator.OauthClientSecret,
 			Scopes:       []string{"User.Read"},
@@ -94,7 +106,7 @@ func (self *AzureAuthenticator) oauthAzureLogin() http.Handler {
 		// Create oauthState cookie
 		oauthState, err := r.Cookie("oauthstate")
 		if err != nil {
-			oauthState = generateStateOauthCookie(w)
+			oauthState = generateStateOauthCookie(self.config_obj, w)
 		}
 
 		u := azureOauthConfig.AuthCodeURL(oauthState.Value)
@@ -107,10 +119,11 @@ func (self *AzureAuthenticator) oauthAzureCallback() http.Handler {
 		// Read oauthState from Cookie
 		oauthState, _ := r.Cookie("oauthstate")
 
-		if r.FormValue("state") != oauthState.Value {
+		if oauthState == nil || r.FormValue("state") != oauthState.Value {
 			logging.GetLogger(self.config_obj, &logging.GUIComponent).
 				Error("invalid oauth azure state")
-			http.Redirect(w, r, "/", http.StatusTemporaryRedirect)
+			http.Redirect(w, r, utils.Homepage(self.config_obj),
+				http.StatusTemporaryRedirect)
 			return
 		}
 
@@ -119,52 +132,42 @@ func (self *AzureAuthenticator) oauthAzureCallback() http.Handler {
 		if err != nil {
 			logging.GetLogger(self.config_obj, &logging.GUIComponent).
 				WithFields(logrus.Fields{
-					"err": err,
+					"err": err.Error(),
 				}).Error("getUserDataFromAzure")
-			http.Redirect(w, r, "/", http.StatusTemporaryRedirect)
+			http.Redirect(w, r, utils.Homepage(self.config_obj),
+				http.StatusTemporaryRedirect)
 			return
 		}
 
 		// Create a new token object, specifying signing method and the claims
 		// you would like it to contain.
-		token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
-			"user": user_info.Mail,
-
-			// Require re-auth after one day.
-			"expires": float64(time.Now().AddDate(0, 0, 1).Unix()),
-			"picture": "/auth/azure/picture",
-			"token":   user_info.Token,
-		})
-
-		// Sign and get the complete encoded token as a string using the secret
-		tokenString, err := token.SignedString(
-			[]byte(self.config_obj.Frontend.PrivateKey))
+		cookie, err := getSignedJWTTokenCookie(
+			self.config_obj, self.authenticator,
+			&Claims{
+				Username: user_info.Mail,
+				Picture:  utils.Join(self.base, "/auth/azure/picture"),
+				Token:    user_info.Token,
+			})
 		if err != nil {
 			logging.GetLogger(self.config_obj, &logging.GUIComponent).
 				WithFields(logrus.Fields{
-					"err": err,
+					"err": err.Error(),
 				}).Error("getUserDataFromAzure")
-			http.Redirect(w, r, "/", http.StatusTemporaryRedirect)
+			http.Redirect(w, r, utils.Homepage(self.config_obj),
+				http.StatusTemporaryRedirect)
 			return
 		}
 
-		// Set the cookie and redirect.
-		cookie := &http.Cookie{
-			Name:     "VelociraptorAuth",
-			Value:    tokenString,
-			Path:     "/",
-			Secure:   true,
-			HttpOnly: true,
-			Expires:  time.Now().AddDate(0, 0, 1),
-		}
 		http.SetCookie(w, cookie)
-		http.Redirect(w, r, "/", http.StatusTemporaryRedirect)
+		http.Redirect(w, r, utils.Homepage(self.config_obj),
+			http.StatusTemporaryRedirect)
 	})
 }
 
 func (self *AzureAuthenticator) getAzureOauthConfig() *oauth2.Config {
 	return &oauth2.Config{
-		RedirectURL:  self.config_obj.GUI.PublicUrl + "auth/azure/callback",
+		RedirectURL: utils.Join(self.public_url, self.base,
+			"/auth/azure/callback"),
 		ClientID:     self.authenticator.OauthClientId,
 		ClientSecret: self.authenticator.OauthClientSecret,
 		Scopes:       []string{"User.Read"},
@@ -225,43 +228,14 @@ func (self *AzureAuthenticator) oauthAzurePicture() http.Handler {
 			w.WriteHeader(http.StatusUnauthorized)
 		}
 
-		auth_cookie, err := r.Cookie("VelociraptorAuth")
+		claims, err := getDetailsFromCookie(self.config_obj, r)
 		if err != nil {
 			reject(err)
-			return
-		}
-
-		// Parse the JWT.
-		token, err := jwt.Parse(
-			auth_cookie.Value,
-			func(token *jwt.Token) (interface{}, error) {
-				_, ok := token.Method.(*jwt.SigningMethodHMAC)
-				if !ok {
-					return nil, errors.New("invalid signing method")
-				}
-				return []byte(self.config_obj.Frontend.PrivateKey), nil
-			})
-		if err != nil {
-			reject(err)
-			return
-		}
-
-		claims, ok := token.Claims.(jwt.MapClaims)
-		if !ok || !token.Valid {
-			reject(errors.New("token not valid"))
-			return
-		}
-
-		// Record the username for handlers lower in the
-		// stack.
-		token_str, pres := claims["token"].(string)
-		if !pres {
-			reject(errors.New("token not present"))
 			return
 		}
 
 		oauth_token := &oauth2.Token{}
-		err = json.Unmarshal([]byte(token_str), &oauth_token)
+		err = json.Unmarshal([]byte(claims.Token), &oauth_token)
 		if err != nil {
 			reject(err)
 			return

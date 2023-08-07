@@ -2,9 +2,11 @@ package usn
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"time"
 
+	"www.velocidex.com/golang/go-ntfs/parser"
 	ntfs "www.velocidex.com/golang/go-ntfs/parser"
 	"www.velocidex.com/golang/velociraptor/accessors"
 	"www.velocidex.com/golang/velociraptor/accessors/ntfs/readers"
@@ -46,18 +48,18 @@ func NewUSNWatcherService() *USNWatcherService {
 
 func (self *USNWatcherService) Register(
 	device *accessors.OSPath,
+	accessor string,
 	ctx context.Context,
 	config_obj *config_proto.Config,
 	scope vfilter.Scope,
-	output_chan chan vfilter.Row) func() {
+	output_chan chan vfilter.Row) (func(), error) {
 
 	self.mu.Lock()
 	defer self.mu.Unlock()
 
-	ntfs_ctx, err := readers.GetNTFSContext(scope, device, "ntfs")
+	ntfs_ctx, err := readers.GetNTFSContext(scope, device, accessor)
 	if err != nil {
-		scope.Log("watch_usn: %v", err)
-		return func() {}
+		return nil, fmt.Errorf("while opening device %v: %w", device, err)
 	}
 
 	subctx, cancel := context.WithCancel(ctx)
@@ -113,6 +115,35 @@ func (self *USNWatcherService) Register(
 			self.registrations[key] = new_handles
 		}
 		cancel()
+	}, nil
+}
+
+// Distribute the event to all interested listeners.
+func (self *USNWatcherService) distributeEvent(
+	event *parser.USN_RECORD, key string) {
+
+	self.mu.Lock()
+	handlers, pres := self.registrations[key]
+
+	// Make a local copy to ensure the handler can be unregistered. If
+	// it does, the handler's ctx will be done so this becomes a noop.
+	handlers = handlers[:]
+	self.mu.Unlock()
+
+	if pres {
+		// Distribute to all listeners
+		enriched_event := makeUSNRecord(event)
+		for _, handler := range handlers {
+			select {
+			// This handler is done - drop the event for this handler.
+			case <-handler.ctx.Done():
+			case handler.output_chan <- enriched_event:
+
+				// Wait up to 10 seconds to send the event
+				// otherwise drop it.
+			case <-time.After(10 * time.Second):
+			}
+		}
 	}
 }
 
@@ -156,22 +187,7 @@ func (self *USNWatcherService) StartMonitoring(
 			if !ok {
 				return
 			}
-
-			self.mu.Lock()
-
-			handlers, pres := self.registrations[key]
-			if pres {
-				// Distribute to all listeners
-				enriched_event := makeUSNRecord(event)
-				for _, handler := range handlers {
-					select {
-					// This handler is done -drop the event for this handler.
-					case <-handler.ctx.Done():
-					case handler.output_chan <- enriched_event:
-					}
-				}
-			}
-			self.mu.Unlock()
+			self.distributeEvent(event, key)
 		}
 	}
 

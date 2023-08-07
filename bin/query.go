@@ -1,6 +1,6 @@
 /*
-   Velociraptor - Hunting Evil
-   Copyright (C) 2019 Velocidex Innovations.
+   Velociraptor - Dig Deeper
+   Copyright (C) 2019-2022 Rapid7 Inc.
 
    This program is free software: you can redistribute it and/or modify
    it under the terms of the GNU Affero General Public License as published
@@ -40,6 +40,7 @@ import (
 	"www.velocidex.com/golang/velociraptor/uploads"
 	"www.velocidex.com/golang/velociraptor/utils"
 	vql_subsystem "www.velocidex.com/golang/velociraptor/vql"
+	"www.velocidex.com/golang/velociraptor/vql/acl_managers"
 	"www.velocidex.com/golang/vfilter"
 )
 
@@ -52,6 +53,10 @@ var (
 	query_command_collect_timeout = query.Flag(
 		"timeout", "Time collection out after this many seconds.").
 		Default("0").Float64()
+
+	query_org_id = query.Flag(
+		"org", "The Org ID to target with this query").
+		Default("root").String()
 
 	query_command_collect_cpu_limit = query.Flag(
 		"cpu_limit", "A number between 0 to 100 representing maximum CPU utilization.").
@@ -122,7 +127,7 @@ func outputCSV(ctx context.Context,
 		10, *max_wait)
 
 	csv_writer := csv.GetCSVAppender(config_obj,
-		scope, &StdoutWrapper{out}, true /* write_headers */)
+		scope, &StdoutWrapper{out}, csv.WriteHeaders, json.DefaultEncOpts())
 	defer csv_writer.Close()
 
 	for result := range result_chan {
@@ -151,6 +156,8 @@ func doRemoteQuery(
 	config_obj *config_proto.Config, format string,
 	queries []string, env *ordereddict.Dict) error {
 
+	logging.DisableLogging()
+
 	ctx, cancel := install_sig_handler()
 	defer cancel()
 
@@ -163,6 +170,7 @@ func doRemoteQuery(
 	logger := logging.GetLogger(config_obj, &logging.ToolComponent)
 
 	request := &actions_proto.VQLCollectorArgs{
+		OrgId:    *query_org_id,
 		MaxRow:   1000,
 		MaxWait:  1,
 		CpuLimit: float32(*query_command_collect_cpu_limit),
@@ -235,7 +243,8 @@ func doRemoteQuery(
 			scope := vql_subsystem.MakeScope()
 
 			csv_writer := csv.GetCSVAppender(config_obj,
-				scope, &StdoutWrapper{os.Stdout}, true /* write_headers */)
+				scope, &StdoutWrapper{os.Stdout},
+				csv.WriteHeaders, json.DefaultEncOpts())
 			defer csv_writer.Close()
 
 			for _, row := range rows {
@@ -246,33 +255,31 @@ func doRemoteQuery(
 	return nil
 }
 
-func startEssentialServices(
-	config_obj *config_proto.Config) (
-	*services.Service, error) {
-
-	sm := services.NewServiceManager(context.Background(), config_obj)
-	err := startup.StartupEssentialServices(sm)
-	if err != nil {
-		return nil, err
-	}
-
-	// Load any artifacts defined in the config file after all the
-	// services are up.
-	err = load_config_artifacts(config_obj)
-	return sm, err
-}
-
 func doQuery() error {
-	config_obj, err := APIConfigLoader.WithNullLoader().LoadAndValidate()
+	logging.DisableLogging()
+
+	config_obj, err := APIConfigLoader.WithNullLoader().
+		LoadAndValidate()
 	if err != nil {
 		return err
 	}
 
-	sm, err := startEssentialServices(config_obj)
-	if err != nil {
-		return fmt.Errorf("Starting services: %w", err)
+	config_obj.Services = services.GenericToolServices()
+	if config_obj.Datastore != nil && config_obj.Datastore.Location != "" {
+		config_obj.Services.IndexServer = true
+		config_obj.Services.ClientInfo = true
+		config_obj.Services.Label = true
 	}
+
+	ctx, cancel := install_sig_handler()
+	defer cancel()
+
+	sm, err := startup.StartToolServices(ctx, config_obj)
 	defer sm.Close()
+
+	if err != nil {
+		return err
+	}
 
 	env := ordereddict.NewDict()
 	for k, v := range *env_map {
@@ -293,13 +300,13 @@ func doQuery() error {
 
 	builder := services.ScopeBuilder{
 		Config:     config_obj,
-		ACLManager: vql_subsystem.NullACLManager{},
+		ACLManager: acl_managers.NullACLManager{},
 		Logger:     log.New(&LogWriter{config_obj}, "", 0),
 		Env:        ordereddict.NewDict(),
 	}
 
 	if *run_as != "" {
-		builder.ACLManager = vql_subsystem.NewServerACLManager(config_obj, *run_as)
+		builder.ACLManager = acl_managers.NewServerACLManager(config_obj, *run_as)
 	}
 
 	// Configure an uploader if required.
@@ -315,7 +322,7 @@ func doQuery() error {
 		}
 	}
 
-	manager, err := services.GetRepositoryManager()
+	manager, err := services.GetRepositoryManager(config_obj)
 	if err != nil {
 		return err
 	}
@@ -340,9 +347,6 @@ func doQuery() error {
 		}
 
 	}
-
-	ctx, cancel := InstallSignalHandler(sm.Ctx, scope)
-	defer cancel()
 
 	if *query_command_collect_timeout > 0 {
 		start := time.Now()

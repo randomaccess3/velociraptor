@@ -1,16 +1,23 @@
 package accessors
 
 import (
+	"fmt"
 	"sync"
 
 	"github.com/Velocidex/ordereddict"
-	errors "github.com/pkg/errors"
+	errors "github.com/go-errors/errors"
+
+	config_proto "www.velocidex.com/golang/velociraptor/config/proto"
 	"www.velocidex.com/golang/velociraptor/constants"
+	vql_subsystem "www.velocidex.com/golang/velociraptor/vql"
 	"www.velocidex.com/golang/vfilter"
 )
 
 var (
-	GlobalDeviceManager = NewDefaultDeviceManager()
+	mu sync.Mutex
+
+	// A global device manager is used to register handles.
+	globalDeviceManager *DefaultDeviceManager = NewDefaultDeviceManager()
 )
 
 // A device manager is a factory for creating accessors.
@@ -30,15 +37,34 @@ func GetManager(scope vfilter.Scope) DeviceManager {
 		}
 	}
 
-	return GlobalDeviceManager
+	config_obj, ok := vql_subsystem.GetServerConfig(scope)
+	if !ok {
+		return globalDeviceManager.Copy()
+	}
+
+	return GetDefaultDeviceManager(config_obj)
+}
+
+func GetDefaultDeviceManager(config_obj *config_proto.Config) DeviceManager {
+	mu.Lock()
+	defer mu.Unlock()
+
+	return globalDeviceManager
 }
 
 func GetAccessor(scheme string, scope vfilter.Scope) (FileSystemAccessor, error) {
 	// Fallback to the file handler - this should work
 	// because there needs to be at least a file handler
 	// registered.
-	if scheme == "" {
+	switch scheme {
+
+	case "":
 		scheme = "auto"
+
+	case "reg":
+		// Backwards compatibility uses old shortname for reg
+		// accessor.
+		scheme = "registry"
 	}
 
 	return GetManager(scope).GetAccessor(scheme, scope)
@@ -100,6 +126,10 @@ func (self *DefaultDeviceManager) Copy() DeviceManager {
 	self.mu.Lock()
 	defer self.mu.Unlock()
 
+	return self.copy()
+}
+
+func (self *DefaultDeviceManager) copy() *DefaultDeviceManager {
 	result := NewDefaultDeviceManager()
 	for k, v := range self.handlers {
 		result.handlers[k] = v
@@ -112,9 +142,32 @@ func (self *DefaultDeviceManager) Copy() DeviceManager {
 
 func Register(
 	scheme string, accessor FileSystemAccessor, description string) {
-	GlobalDeviceManager.Register(scheme, accessor, description)
+	globalDeviceManager.Register(scheme, accessor, description)
 }
 
 func DescribeAccessors() *ordereddict.Dict {
-	return GlobalDeviceManager.DescribeAccessors()
+	return globalDeviceManager.DescribeAccessors()
+}
+
+func EnforceAccessorAllowList(allowed_accessors []string) error {
+	mu.Lock()
+	defer mu.Unlock()
+
+	global_manager := globalDeviceManager
+	globalDeviceManager = NewDefaultDeviceManager()
+
+	for _, allowed := range allowed_accessors {
+		impl, ok := global_manager.handlers[allowed]
+		if !ok {
+			return fmt.Errorf("Unknown accessor in allow list: %v", allowed)
+		}
+
+		globalDeviceManager.handlers[allowed] = impl
+		desc, pres := global_manager.descriptions.Get(allowed)
+		if pres {
+			globalDeviceManager.descriptions.Set(allowed, desc)
+		}
+	}
+
+	return nil
 }

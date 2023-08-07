@@ -11,6 +11,7 @@ import (
 	"www.velocidex.com/golang/velociraptor/accessors"
 	config_proto "www.velocidex.com/golang/velociraptor/config/proto"
 	"www.velocidex.com/golang/velociraptor/file_store/api"
+	"www.velocidex.com/golang/velociraptor/file_store/path_specs"
 	"www.velocidex.com/golang/velociraptor/uploads"
 	"www.velocidex.com/golang/vfilter"
 )
@@ -26,7 +27,7 @@ func (self *FileStoreUploader) Upload(
 	scope vfilter.Scope,
 	filename *accessors.OSPath,
 	accessor string,
-	store_as_name string,
+	store_as_name *accessors.OSPath,
 	expected_size int64,
 	mtime time.Time,
 	atime time.Time,
@@ -35,21 +36,28 @@ func (self *FileStoreUploader) Upload(
 	reader io.Reader) (
 	*uploads.UploadResponse, error) {
 
-	if store_as_name == "" {
-		store_as_name = filename.String()
+	if store_as_name == nil {
+		store_as_name = filename
 	}
 
-	output_path := self.root_path.AddUnsafeChild(store_as_name)
+	res, err := self.maybeCollectSparseFile(ctx, reader, store_as_name)
+	if err == nil {
+		return res, nil
+	}
+
+	output_path := self.root_path.AddUnsafeChild(store_as_name.Components...)
 	out_fd, err := self.file_store.WriteFile(output_path)
 	if err != nil {
-		scope.Log("Unable to open file %s: %v", store_as_name, err)
+		scope.Log("Unable to open file %s: %v",
+			store_as_name.String(), err)
 		return nil, err
 	}
 	defer out_fd.Close()
 
 	err = out_fd.Truncate()
 	if err != nil {
-		scope.Log("Unable to truncate file %s: %v", store_as_name, err)
+		scope.Log("Unable to truncate file %s: %v",
+			store_as_name.String(), err)
 		return nil, err
 	}
 
@@ -83,12 +91,19 @@ loop:
 		}
 	}
 
-	scope.Log("Uploaded %v (%v bytes)", output_path.AsClientPath(), offset)
+	// Return paths relative to the storage root.
+	relative_path := path_specs.NewUnsafeFilestorePath(store_as_name.Components...).
+		SetType(api.PATH_TYPE_FILESTORE_ANY)
+
+	scope.Log("Uploaded %v (%v bytes)", relative_path.AsClientPath(), offset)
 	return &uploads.UploadResponse{
-		Path:   output_path.AsClientPath(),
-		Size:   uint64(offset),
-		Sha256: hex.EncodeToString(sha_sum.Sum(nil)),
-		Md5:    hex.EncodeToString(md5_sum.Sum(nil)),
+		Path:       relative_path.AsClientPath(),
+		Size:       uint64(offset),
+		StoredSize: uint64(offset),
+		Sha256:     hex.EncodeToString(sha_sum.Sum(nil)),
+		Md5:        hex.EncodeToString(md5_sum.Sum(nil)),
+		// Full components to the file in Components
+		Components: output_path.Components(),
 	}, nil
 }
 

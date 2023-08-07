@@ -18,6 +18,7 @@ import (
 	"github.com/Velocidex/ordereddict"
 	gowin "golang.org/x/sys/windows"
 	"www.velocidex.com/golang/velociraptor/acls"
+	"www.velocidex.com/golang/velociraptor/vql"
 	vql_subsystem "www.velocidex.com/golang/velociraptor/vql"
 	"www.velocidex.com/golang/velociraptor/vql/windows"
 	"www.velocidex.com/golang/vfilter"
@@ -106,9 +107,10 @@ func (self HandlesPlugin) Call(
 
 func (self HandlesPlugin) Info(scope vfilter.Scope, type_map *vfilter.TypeMap) *vfilter.PluginInfo {
 	return &vfilter.PluginInfo{
-		Name:    "handles",
-		Doc:     "Enumerate process handles.",
-		ArgType: type_map.AddType(scope, &HandlesPluginArgs{}),
+		Name:     "handles",
+		Doc:      "Enumerate process handles.",
+		ArgType:  type_map.AddType(scope, &HandlesPluginArgs{}),
+		Metadata: vql.VQLMetadata().Permissions(acls.MACHINE_STATE).Build(),
 	}
 }
 
@@ -265,6 +267,7 @@ func SendHandleInfo(arg *HandlesPluginArgs, scope vfilter.Scope,
 			case "Token":
 				result.TokenInfo = GetTokenInfo(scope, handle)
 			default:
+				// Try to get the name if possible
 				GetObjectName(scope, handle, result)
 			}
 		}
@@ -359,10 +362,16 @@ func GetThreadInfo(scope vfilter.Scope, handle syscall.Handle, result *HandleInf
 
 	status = windows.NtOpenThreadToken(handle,
 		syscall.TOKEN_READ, true, &token_handle)
-
 	if status == windows.STATUS_SUCCESS {
 		result.ThreadInfo.TokenInfo = GetTokenInfo(scope, token_handle)
 		windows.CloseHandle(token_handle)
+
+		// If the thread is not impersonating the error will be
+		// STATUS_NO_TOKEN
+	} else if status != windows.STATUS_NO_TOKEN &&
+		status != windows.STATUS_ACCESS_DENIED {
+		scope.Log("windows.NtOpenThreadToken status %v",
+			windows.NTStatus_String(status))
 	}
 }
 
@@ -407,11 +416,16 @@ func GetObjectName(scope vfilter.Scope, handle syscall.Handle, result *HandleInf
 	status, _ := windows.NtQueryObject(handle, windows.ObjectNameInformation,
 		&buffer[0], uint32(len(buffer)), &length)
 
-	if status != windows.STATUS_SUCCESS {
-		scope.Log("GetObjectName status %v", windows.NTStatus_String(status))
+	if status == windows.STATUS_INVALID_HANDLE {
+		return
 	}
 
-	result.Name = (*windows.UNICODE_STRING)(unsafe.Pointer(&buffer[0])).String()
+	if status != windows.STATUS_SUCCESS {
+		scope.Log("GetObjectName status %v", windows.NTStatus_String(status))
+
+	} else {
+		result.Name = (*windows.UNICODE_STRING)(unsafe.Pointer(&buffer[0])).String()
+	}
 }
 
 func GetObjectType(handle syscall.Handle, scope vfilter.Scope) string {

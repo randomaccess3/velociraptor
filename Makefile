@@ -1,14 +1,23 @@
 all:
 	go run make.go -v autoDev
 
+assets:
+	go run make.go -v assets
+
 auto:
 	go run make.go -v auto
 
 test:
 	go test -race -v --tags server_vql ./...
 
+test_light:
+	go test -v --tags server_vql ./...
+
 golden:
 	./output/velociraptor -v --config artifacts/testdata/windows/test.config.yaml golden artifacts/testdata/server/testcases/ --env srcDir=`pwd` --filter=${GOLDEN}
+
+debug_golden:
+	dlv debug --build-flags="-tags 'server_vql extras'" ./bin/ -- --config artifacts/testdata/windows/test.config.yaml golden artifacts/testdata/server/testcases/ --env srcDir=`pwd` --disable_alarm -v --filter=${GOLDEN}
 
 references:
 	./output/velociraptor vql export docs/references/vql.yaml > docs/references/vql.yaml.tmp
@@ -29,6 +38,12 @@ darwin_m1:
 
 linux_m1:
 	go run make.go -v LinuxM1
+
+linux_arm64:
+	go run make.go -v LinuxArm64
+
+linux_musl:
+	go run make.go -v LinuxMusl
 
 linux:
 	go run make.go -v linux
@@ -61,11 +76,11 @@ check:
 debug:
 	dlv debug --wd=. --build-flags="-tags 'server_vql extras'" ./bin/ -- frontend --disable-panic-guard -v --debug
 
-debug_client:
-	dlv debug --build-flags="-tags 'server_vql extras'" ./bin/ -- client -v
+debug_minion:
+	dlv debug --wd=. --build-flags="-tags 'server_vql extras'" ./bin/ -- frontend --disable-panic-guard -v --debug --minion --node ${NODE}
 
-debug_golden:
-	dlv debug --build-flags="-tags 'server_vql extras'" ./bin/ -- --config artifacts/testdata/windows/test.config.yaml golden artifacts/testdata/server/testcases/ --env srcDir=`pwd` --disable_alarm -v --filter=${GOLDEN}
+debug_client:
+	dlv debug --build-flags="-tags 'server_vql extras'" ./bin/ -- client -v --debug --debug_port 6061
 
 lint:
 	golangci-lint run
@@ -76,6 +91,9 @@ KapeFilesSync:
 
 SQLECmdSync:
 	python3 scripts/sqlecmd_convert.py ~/projects/SQLECmd/ ~/projects/KapeFiles/ artifacts/definitions/Generic/Collectors/SQLECmd.yaml
+
+SQLiteHunter:
+	cp ~/projects/SQLiteHunter/output/SQLiteHunter.yaml artifacts/definitions/Generic/Forensic/SQLiteHunter/
 
 # Do this after fetching the build artifacts with `gh run download <RunID>`
 UpdateCIArtifacts:
@@ -90,3 +108,6 @@ UpdateCerts:
 # First git checkout origin/v0.6.3
 archive_artifacts:
 	zip -r release_artifacts_$(basename "$(git status | head -1)").zip artifacts/definitions/ -i \*.yaml
+
+translations:
+	python3 ./scripts/find_i8n_translations.py ./gui/velociraptor/src/components/i8n/

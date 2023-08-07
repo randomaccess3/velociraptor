@@ -1,6 +1,6 @@
 /*
-   Velociraptor - Hunting Evil
-   Copyright (C) 2019 Velocidex Innovations.
+   Velociraptor - Dig Deeper
+   Copyright (C) 2019-2022 Rapid7 Inc.
 
    This program is free software: you can redistribute it and/or modify
    it under the terms of the GNU Affero General Public License as published
@@ -18,12 +18,9 @@
 package file_store
 
 import (
-	"errors"
 	"fmt"
 	"sync"
 
-	"www.velocidex.com/golang/velociraptor/accessors"
-	file_store_accessor "www.velocidex.com/golang/velociraptor/accessors/file_store"
 	config_proto "www.velocidex.com/golang/velociraptor/config/proto"
 	"www.velocidex.com/golang/velociraptor/datastore"
 	"www.velocidex.com/golang/velociraptor/file_store/api"
@@ -33,12 +30,10 @@ import (
 )
 
 var (
-	fs_mu         sync.Mutex
-	memory_imp    *memory.MemoryFileStore
-	memcache_imp  *memcache.MemcacheFileStore
-	directory_imp *directory.DirectoryFileStore
+	fs_mu sync.Mutex
 
-	g_impl api.FileStore
+	// Key of org id to cache filestores
+	g_impl = make(map[string]api.FileStore)
 )
 
 // GetFileStore selects an appropriate FileStore object based on
@@ -47,8 +42,10 @@ func GetFileStore(config_obj *config_proto.Config) api.FileStore {
 	fs_mu.Lock()
 	defer fs_mu.Unlock()
 
-	if g_impl != nil {
-		return g_impl
+	// Maintain a different filestore for each org.
+	impl, pres := g_impl[config_obj.OrgId]
+	if pres {
+		return impl
 	}
 
 	if config_obj.Datastore == nil {
@@ -61,6 +58,7 @@ func GetFileStore(config_obj *config_proto.Config) api.FileStore {
 	}
 
 	res, _ := getImpl(implementation, config_obj)
+	g_impl[config_obj.OrgId] = res
 	return res
 }
 
@@ -68,66 +66,26 @@ func getImpl(implementation string,
 	config_obj *config_proto.Config) (api.FileStore, error) {
 	switch implementation {
 	case "Test":
-		if memory_imp == nil {
-			memory_imp = memory.NewMemoryFileStore(config_obj)
-		}
-		return memory_imp, nil
+		return memory.NewMemoryFileStore(config_obj), nil
 
 	case "MemcacheFileDataStore", "RemoteFileDataStore":
-		if memcache_imp == nil {
-			memcache_imp = memcache.NewMemcacheFileStore(config_obj)
-		}
-		return memcache_imp, nil
+		return memcache.NewMemcacheFileStore(config_obj), nil
 
 	case "FileBaseDataStore", "ReadOnlyDataStore":
-		if directory_imp == nil {
-			directory_imp = directory.NewDirectoryFileStore(config_obj)
-		}
-		return directory_imp, nil
+		return directory.NewDirectoryFileStore(config_obj), nil
 
 	default:
 		return nil, fmt.Errorf("Unsupported filestore %v", implementation)
 	}
 }
 
-// Gets an accessor that can access the file store.
-func GetFileStoreFileSystemAccessor(
-	config_obj *config_proto.Config) (accessors.FileSystemAccessor, error) {
-
+// Override the implementation
+func OverrideFilestoreImplementation(
+	config_obj *config_proto.Config, impl api.FileStore) {
 	fs_mu.Lock()
 	defer fs_mu.Unlock()
 
-	if g_impl != nil {
-		return file_store_accessor.NewFileStoreFileSystemAccessor(
-			config_obj, g_impl), nil
-	}
-
-	if config_obj.Datastore == nil {
-		return nil, errors.New("Datastore not configured")
-	}
-
-	implementation, err := datastore.GetImplementationName(config_obj)
-	if err != nil {
-		return nil, err
-	}
-
-	switch implementation {
-
-	case "MemcacheFileDataStore":
-		return file_store_accessor.NewFileStoreFileSystemAccessor(
-			config_obj, memcache_imp), nil
-
-	case "FileBaseDataStore", "RemoteFileDataStore", "ReadOnlyDataStore":
-		return file_store_accessor.NewFileStoreFileSystemAccessor(
-			config_obj, directory_imp), nil
-
-	case "Test":
-		return file_store_accessor.NewFileStoreFileSystemAccessor(
-			config_obj, memory_imp), nil
-
-	}
-
-	return nil, errors.New("Unknown file store implementation")
+	g_impl[config_obj.OrgId] = impl
 }
 
 func SetGlobalFilestore(
@@ -136,16 +94,18 @@ func SetGlobalFilestore(
 	fs_mu.Lock()
 	defer fs_mu.Unlock()
 
-	g_impl, err = getImpl(implementation, config_obj)
-	return err
+	impl, err := getImpl(implementation, config_obj)
+	if err != nil {
+		return err
+	}
+
+	g_impl[config_obj.OrgId] = impl
+	return nil
 }
 
 func Reset() {
 	fs_mu.Lock()
 	defer fs_mu.Unlock()
 
-	memory_imp = nil
-	memcache_imp = nil
-	directory_imp = nil
-	g_impl = nil
+	g_impl = make(map[string]api.FileStore)
 }

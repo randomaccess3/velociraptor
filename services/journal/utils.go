@@ -2,10 +2,10 @@ package journal
 
 import (
 	"context"
+	"errors"
 	"sync"
 
 	"github.com/Velocidex/ordereddict"
-	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 	config_proto "www.velocidex.com/golang/velociraptor/config/proto"
 	flows_proto "www.velocidex.com/golang/velociraptor/flows/proto"
@@ -31,9 +31,7 @@ func WatchForCollectionWithCB(ctx context.Context,
 			row *ordereddict.Dict) error {
 
 			// Extract the flow description from the event.
-			flow := &flows_proto.ArtifactCollectorContext{}
-			flow_any, _ := row.Get("Flow")
-			err := utils.ParseIntoProtobuf(flow_any, flow)
+			flow, err := GetFlowFromQueue(ctx, config_obj, row)
 			if err != nil {
 				return err
 			}
@@ -65,7 +63,7 @@ func WatchQueueWithCB(ctx context.Context,
 		config_obj *config_proto.Config,
 		row *ordereddict.Dict) error) error {
 
-	journal, err := services.GetJournal()
+	journal, err := services.GetJournal(config_obj)
 	if err != nil {
 		return err
 	}
@@ -91,7 +89,7 @@ func WatchQueueWithCB(ctx context.Context,
 					logger.WithFields(logrus.Fields{
 						"Owner":    watcher_name,
 						"Artifact": artifact,
-						"Error":    err,
+						"Error":    err.Error(),
 					}).Debug("Event Processor Error")
 				}
 
@@ -102,4 +100,52 @@ func WatchQueueWithCB(ctx context.Context,
 	}()
 
 	return nil
+}
+
+// A convenience function to recover the full flow object from
+// System.Flow.Completion. In recent Velociraptor version, the event
+// is sent by the minion without reading the full object from
+// disk. This allows faster processing on the server but it means we
+// dont have the full object available.
+func GetFlowFromQueue(
+	ctx context.Context,
+	config_obj *config_proto.Config,
+	row *ordereddict.Dict) (*flows_proto.ArtifactCollectorContext, error) {
+
+	flow_id, pres := row.GetString("FlowId")
+	if !pres {
+		return nil, errors.New("FlowId not found")
+	}
+
+	client_id, pres := row.GetString("ClientId")
+	if !pres {
+		return nil, errors.New("ClientId not found")
+	}
+
+	launcher, err := services.GetLauncher(config_obj)
+	if err != nil {
+		return nil, err
+	}
+
+	flow_details, err := launcher.GetFlowDetails(
+		ctx, config_obj, client_id, flow_id)
+	if err != nil ||
+		flow_details == nil ||
+		flow_details.Context == nil {
+
+		// If we can not open the flow from storage try to recover
+		// something from the row.
+		flow := &flows_proto.ArtifactCollectorContext{}
+		flow_any, pres := row.Get("Flow")
+		if !pres {
+			return nil, errors.New("Flow not found")
+		}
+		err := utils.ParseIntoProtobuf(flow_any, flow)
+		if err != nil {
+			return nil, err
+		}
+		return flow, nil
+	}
+
+	return flow_details.Context, nil
 }

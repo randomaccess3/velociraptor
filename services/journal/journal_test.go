@@ -5,6 +5,7 @@ import (
 	"io/ioutil"
 	"os"
 	"testing"
+	"time"
 
 	"github.com/Velocidex/ordereddict"
 	"github.com/alecthomas/assert"
@@ -41,15 +42,15 @@ func (self *JournalTestSuite) SetupTest() {
 	self.ConfigObj.Datastore.FilestoreDirectory = dir
 	self.ConfigObj.Datastore.Location = dir
 
-	self.TestSuite.SetupTest()
-
-	self.LoadArtifacts([]string{`
+	self.LoadArtifactsIntoConfig([]string{`
 name: System.Flow.Completion
 type: CLIENT_EVENT
 `, `
 name: System.Hunt.Participation
 type: SERVER_EVENT
 `})
+
+	self.TestSuite.SetupTest()
 }
 
 func (self *JournalTestSuite) TearDownTest() {
@@ -59,10 +60,10 @@ func (self *JournalTestSuite) TearDownTest() {
 }
 
 func (self *JournalTestSuite) TestJournalWriting() {
-	journal, err := services.GetJournal()
+	journal, err := services.GetJournal(self.ConfigObj)
 	assert.NoError(self.T(), err)
 
-	clock := &utils.MockClock{}
+	clock := utils.NewMockClock(time.Time{})
 	start := clock.Now()
 
 	// Simulate a slow filesystem (70 ms per filesystem access).
@@ -72,8 +73,9 @@ func (self *JournalTestSuite) TestJournalWriting() {
 	snapshot := vtesting.GetMetrics(self.T(), ".")
 
 	// Write 10 rows in series
+	ctx := self.Ctx
 	for i := 0; i < 10; i++ {
-		err = journal.PushRowsToArtifact(self.ConfigObj,
+		err = journal.PushRowsToArtifact(ctx, self.ConfigObj,
 			[]*ordereddict.Dict{ordereddict.NewDict().
 				Set("Foo", "Bar").
 				Set("i", i),
@@ -106,15 +108,15 @@ func (self *JournalTestSuite) TestJournalWriting() {
 
 	// Get the total time. It should be much less than 10 times 70ms
 	// (i.e. rows are not written serially).
-	total_time := api.Clock.Now().Sub(start).Seconds()
+	total_time := api.Clock().Now().Sub(start).Seconds()
 	assert.True(self.T(), 0.07*10 > total_time)
 }
 
 func (self *JournalTestSuite) TestJournalJsonlWriting() {
-	journal, err := services.GetJournal()
+	journal, err := services.GetJournal(self.ConfigObj)
 	assert.NoError(self.T(), err)
 
-	clock := &utils.MockClock{}
+	clock := utils.NewMockClock(time.Time{})
 	start := clock.Now()
 
 	// Simulate a slow filesystem (70 ms per filesystem access).
@@ -125,8 +127,8 @@ func (self *JournalTestSuite) TestJournalJsonlWriting() {
 
 	// Write 10 rows in series
 	for i := 0; i < 10; i++ {
-		err = journal.PushJsonlToArtifact(self.ConfigObj,
-			[]byte(fmt.Sprintf("{\"For\":%q,\"i\":%d}\n", "Bar", i)),
+		err = journal.PushJsonlToArtifact(self.Ctx, self.ConfigObj,
+			[]byte(fmt.Sprintf("{\"For\":%q,\"i\":%d}\n", "Bar", i)), 1,
 			"System.Flow.Completion", "C.1234", "")
 		assert.NoError(self.T(), err)
 	}
@@ -155,7 +157,7 @@ func (self *JournalTestSuite) TestJournalJsonlWriting() {
 
 	// Get the total time. It should be much less than 10 times 70ms
 	// (i.e. rows are not written serially).
-	total_time := api.Clock.Now().Sub(start).Seconds()
+	total_time := api.Clock().Now().Sub(start).Seconds()
 	assert.True(self.T(), 0.07*10 > total_time)
 }
 

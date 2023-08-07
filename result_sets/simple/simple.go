@@ -30,13 +30,15 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
+	"errors"
 	"io"
 	"os"
+	"strconv"
+	"strings"
 	"sync"
 
 	"github.com/Velocidex/json"
 	"github.com/Velocidex/ordereddict"
-	"github.com/pkg/errors"
 	"www.velocidex.com/golang/velociraptor/file_store/api"
 	vjson "www.velocidex.com/golang/velociraptor/json"
 	"www.velocidex.com/golang/velociraptor/result_sets"
@@ -54,8 +56,14 @@ type ResultSetWriterImpl struct {
 	fd       api.FileWriter
 	index_fd api.FileWriter
 
+	file_store_factory api.FileStore
+	log_path           api.FSPathSpec
+
 	sync bool
 }
+
+// Noop for file based result set writers.
+func (self *ResultSetWriterImpl) SetStartRow(i int64) {}
 
 func (self *ResultSetWriterImpl) SetSync() {
 	self.mu.Lock()
@@ -179,7 +187,11 @@ func (self ResultSetFactory) NewResultSetWriter(
 	completion func(),
 	truncate result_sets.WriteMode) (result_sets.ResultSetWriter, error) {
 
-	result := &ResultSetWriterImpl{opts: opts}
+	result := &ResultSetWriterImpl{
+		opts:               opts,
+		file_store_factory: file_store_factory,
+		log_path:           log_path,
+	}
 
 	// If no path is provided, we are just a log sink
 	if utils.IsNil(log_path) {
@@ -228,6 +240,7 @@ type ResultSetReaderImpl struct {
 	fd         api.FileReader
 	idx_fd     api.FileReader
 	log_path   api.FSPathSpec
+	idx        int64
 }
 
 func (self *ResultSetReaderImpl) TotalRows() int64 {
@@ -306,40 +319,116 @@ func (self *ResultSetReaderImpl) Rows(ctx context.Context) <-chan *ordereddict.D
 
 		reader := bufio.NewReader(self.fd)
 		for {
-			select {
-			case <-ctx.Done():
+			row_data, err := reader.ReadBytes('\n')
+			if err != nil {
 				return
+			}
 
-			default:
-				row_data, err := reader.ReadBytes('\n')
-				if err != nil {
-					return
-				}
+			// We have reached the end.
+			if len(row_data) == 0 {
+				return
+			}
 
-				// We have reached the end.
-				if len(row_data) == 0 {
-					return
-				}
+			if len(row_data) < 2 {
+				continue
+			}
 
-				item := ordereddict.NewDict()
-
-				// We failed to unmarshal one line of
-				// JSON - it may be corrupted, go to
-				// the next one.
-				err = item.UnmarshalJSON(row_data)
+			// This is a pointer to the real record.
+			if row_data[0] == '@' {
+				ptr_offset, err := strconv.ParseInt(
+					strings.Trim(string(row_data), "@\n"), 0, 64)
 				if err != nil {
 					continue
 				}
 
-				output <- item
+				current_offset, err := self.fd.Seek(0, os.SEEK_CUR)
+				if err != nil {
+					return
+				}
+
+				_, err = self.fd.Seek(ptr_offset, os.SEEK_SET)
+				if err != nil {
+					return
+				}
+
+				// Make a new private buffer so as not to disturb the
+				// original buffer.
+				reader := bufio.NewReader(self.fd)
+				row_data, err = reader.ReadBytes('\n')
+				if err != nil {
+					return
+				}
+
+				// Seek back to the correct position
+				_, err = self.fd.Seek(current_offset, os.SEEK_SET)
+				if err != nil {
+					return
+				}
+
+				if len(row_data) < 2 {
+					continue
+				}
+				replacement := &replacement_record{}
+				err = json.Unmarshal(row_data[1:], replacement)
+				if err != nil {
+					continue
+				}
+
+				row_data = replacement.Data
+			}
+
+			item := ordereddict.NewDict()
+
+			// We failed to unmarshal one line of
+			// JSON - it may be corrupted, go to
+			// the next one.
+			err = item.UnmarshalJSON(row_data)
+			if err != nil {
+				continue
+			}
+
+			select {
+			case <-ctx.Done():
+				return
+			case output <- item:
 			}
 		}
 	}()
 	return output
 }
 
+// Start generating rows from the result set.
+func (self *ResultSetReaderImpl) JSON(ctx context.Context) (<-chan []byte, error) {
+	output := make(chan []byte)
+
+	go func() {
+		defer close(output)
+
+		reader := bufio.NewReader(self.fd)
+		for {
+			row_data, err := reader.ReadBytes('\n')
+			if err != nil {
+				return
+			}
+
+			// We have reached the end.
+			if len(row_data) == 0 {
+				return
+			}
+
+			select {
+			case <-ctx.Done():
+				return
+			case output <- row_data:
+			}
+		}
+	}()
+
+	return output, nil
+}
+
 // Only used in tests - not safe for general use.
-func (self *ResultSetReaderImpl) GetAllResults() []*ordereddict.Dict {
+func GetAllResults(self result_sets.ResultSetReader) []*ordereddict.Dict {
 	result := []*ordereddict.Dict{}
 	for row := range self.Rows(context.Background()) {
 		result = append(result, row)
@@ -384,6 +473,7 @@ func (self ResultSetFactory) NewResultSetReader(
 	} else if err != nil {
 		return nil, err
 	}
+	// Keep the open file until the reader is closed.
 
 	// -1 indicates we dont know how many rows there are
 	total_rows := int64(-1)

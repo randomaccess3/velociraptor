@@ -5,9 +5,12 @@ import (
 	"os"
 
 	"github.com/Velocidex/ordereddict"
+	logging "www.velocidex.com/golang/velociraptor/logging"
 	"www.velocidex.com/golang/velociraptor/reporting"
 	"www.velocidex.com/golang/velociraptor/services"
+	"www.velocidex.com/golang/velociraptor/startup"
 	vql_subsystem "www.velocidex.com/golang/velociraptor/vql"
+	"www.velocidex.com/golang/velociraptor/vql/acl_managers"
 	"www.velocidex.com/golang/vfilter"
 )
 
@@ -20,29 +23,36 @@ var (
 )
 
 func doCSV() error {
+	logging.DisableLogging()
+
 	config_obj, err := makeDefaultConfigLoader().
 		WithNullLoader().LoadAndValidate()
 	if err != nil {
 		return err
 	}
 
-	sm, err := startEssentialServices(config_obj)
+	ctx, cancel := install_sig_handler()
+	defer cancel()
+
+	config_obj.Services = services.GenericToolServices()
+	sm, err := startup.StartToolServices(ctx, config_obj)
+	defer sm.Close()
+
 	if err != nil {
 		return err
 	}
-	defer sm.Close()
 
 	builder := services.ScopeBuilder{
 		Config:     config_obj,
-		ACLManager: vql_subsystem.NullACLManager{},
-		Logger:     log.New(os.Stderr, "velociraptor: ", 0),
+		ACLManager: acl_managers.NullACLManager{},
+		Logger:     log.New(&LogWriter{config_obj}, "", 0),
 		Env: ordereddict.NewDict().
 			Set(vql_subsystem.ACL_MANAGER_VAR,
-				vql_subsystem.NewRoleACLManager("administrator")).
+				acl_managers.NewRoleACLManager(config_obj, "administrator")).
 			Set("Files", *csv_cmd_files),
 	}
 
-	manager, err := services.GetRepositoryManager()
+	manager, err := services.GetRepositoryManager(config_obj)
 	if err != nil {
 		return err
 	}
@@ -60,9 +70,6 @@ func doCSV() error {
 	if err != nil {
 		return err
 	}
-
-	ctx, cancel := InstallSignalHandler(sm.Ctx, scope)
-	defer cancel()
 
 	switch *csv_format {
 	case "text":

@@ -31,12 +31,13 @@ package readers
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"time"
 
+	"github.com/Velocidex/ttlcache/v2"
 	ntfs "www.velocidex.com/golang/go-ntfs/parser"
 	"www.velocidex.com/golang/velociraptor/accessors"
-	"www.velocidex.com/golang/velociraptor/third_party/cache"
 	"www.velocidex.com/golang/velociraptor/utils"
 	vql_subsystem "www.velocidex.com/golang/velociraptor/vql"
 	"www.velocidex.com/golang/vfilter"
@@ -59,7 +60,7 @@ import (
 const READERS_CACHE = "$accessor_reader"
 
 type ReaderPool struct {
-	lru *cache.LRUCache
+	lru *ttlcache.Cache
 }
 
 // Moves the reader to the head of the LRU.
@@ -69,8 +70,8 @@ func (self *ReaderPool) Activate(reader *AccessorReader) {
 
 // Flush all contained readers.
 func (self *ReaderPool) Close() {
-	for _, k := range self.lru.Keys() {
-		self.lru.Delete(k)
+	for _, k := range self.lru.GetKeys() {
+		self.lru.Remove(k)
 	}
 }
 
@@ -81,7 +82,8 @@ type AccessorReader struct {
 	File     *accessors.OSPath
 	Scope    vfilter.Scope
 
-	key string
+	key      string
+	max_size int64
 
 	reader       accessors.ReadSeekCloser
 	paged_reader *ntfs.PagedReader
@@ -98,6 +100,11 @@ type AccessorReader struct {
 	// How long to keep the file handle open
 	Lifetime time.Duration
 	lru_size int
+}
+
+func (self *AccessorReader) DebugString() string {
+	return fmt.Sprintf("AccessorReader %v: %v\n",
+		self.Accessor, self.File.String())
 }
 
 func (self *AccessorReader) SetLifetime(l time.Duration) {
@@ -118,10 +125,19 @@ func (self *AccessorReader) Size() int {
 	return 1
 }
 
+func (self *AccessorReader) MaxSize() int64 {
+	return self.max_size
+}
+
 func (self *AccessorReader) Key() string {
 	return self.key
 }
-func (self *AccessorReader) Close() {
+
+func (self *AccessorReader) Flush() {
+	self.Close()
+}
+
+func (self *AccessorReader) Close() error {
 	self.mu.Lock()
 
 	cancel := self.cancel
@@ -141,6 +157,8 @@ func (self *AccessorReader) Close() {
 	if reader != nil {
 		reader.Close()
 	}
+
+	return nil
 }
 
 func (self *AccessorReader) ReadAt(buf []byte, offset int64) (int, error) {
@@ -149,6 +167,8 @@ func (self *AccessorReader) ReadAt(buf []byte, offset int64) (int, error) {
 	// It is ok to close the reader at any time. We expect this
 	// and just re-open the underlying file when needed.
 	if self.reader == nil {
+		lifetime := self.Lifetime
+
 		accessor, err := accessors.GetAccessor(self.Accessor, self.Scope)
 		if err != nil {
 			self.mu.Unlock()
@@ -167,7 +187,7 @@ func (self *AccessorReader) ReadAt(buf []byte, offset int64) (int, error) {
 		}
 
 		paged_reader, err := ntfs.NewPagedReader(
-			utils.ReaderAtter{Reader: reader}, 1024*8, lru_size)
+			utils.MakeReaderAtter(reader), 1024*8, lru_size)
 		if err != nil {
 			self.mu.Unlock()
 			return 0, err
@@ -195,7 +215,7 @@ func (self *AccessorReader) ReadAt(buf []byte, offset int64) (int, error) {
 
 				// Close the file after its lifetime
 				// is exhausted.
-			case <-time.After(self.GetLifetime()):
+			case <-time.After(lifetime):
 				self.Close()
 			}
 		}()
@@ -235,8 +255,21 @@ func GetReaderPool(scope vfilter.Scope, lru_size int64) *ReaderPool {
 
 		// Create a reader pool
 		pool := &ReaderPool{
-			lru: cache.NewLRUCache(lru_size),
+			lru: ttlcache.NewCache(),
 		}
+		pool.lru.SetCacheSizeLimit(int(lru_size))
+
+		// Close the item on expiration
+		pool.lru.SetExpirationReasonCallback(
+			func(key string, reason ttlcache.EvictionReason, value interface{}) {
+				accessor, ok := value.(*AccessorReader)
+				if ok {
+					accessor.Close()
+				}
+			})
+
+		// When the item expires from the cache we need to close it.
+
 		vql_subsystem.CacheSet(scope, READERS_CACHE, pool)
 
 		// Destroy the pool when the scope is done.
@@ -264,15 +297,36 @@ func NewPagedReader(scope vfilter.Scope,
 
 	// Try to get the reader from the pool
 	key := accessor + "://" + filename.String()
-	value, pres := pool.lru.Get(key)
-	if pres {
+	value, err := pool.lru.Get(key)
+	if err == nil {
 		return value.(*AccessorReader), nil
+	}
+
+	/*
+		if accessor != "data" {
+			fmt.Printf("Creating a new reader for %v\n", key)
+		} else {
+			fmt.Printf("Creating a new reader for data (len %v)\n", len(key))
+		}
+	*/
+
+	accessor_obj, err := accessors.GetAccessor(accessor, scope)
+	if err != nil {
+		return nil, err
+	}
+
+	// If we can figure out the size of the file we might do this now.
+	var max_size int64
+	stat, err := accessor_obj.LstatWithOSPath(filename)
+	if err == nil {
+		max_size = stat.Size()
 	}
 
 	result := &AccessorReader{
 		Accessor:    accessor,
 		File:        filename,
 		key:         key,
+		max_size:    max_size,
 		Scope:       scope,
 		pool:        pool,
 		created:     time.Now(),

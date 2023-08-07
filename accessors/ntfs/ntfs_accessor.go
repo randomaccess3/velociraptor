@@ -2,8 +2,8 @@ package ntfs
 
 // This is an accessor which represents an NTFS filesystem
 /*
-   Velociraptor - Hunting Evil
-   Copyright (C) 2019 Velocidex Innovations.
+   Velociraptor - Dig Deeper
+   Copyright (C) 2019-2022 Rapid7 Inc.
 
    This program is free software: you can redistribute it and/or modify
    it under the terms of the GNU Affero General Public License as published
@@ -21,6 +21,7 @@ package ntfs
 // A Raw NTFS accessor for disks.
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -30,7 +31,7 @@ import (
 	"time"
 
 	"github.com/Velocidex/ordereddict"
-	errors "github.com/pkg/errors"
+
 	ntfs "www.velocidex.com/golang/go-ntfs/parser"
 	"www.velocidex.com/golang/velociraptor/accessors"
 	"www.velocidex.com/golang/velociraptor/accessors/ntfs/readers"
@@ -73,6 +74,10 @@ func (self *NTFSFileInfo) Data() *ordereddict.Dict {
 
 func (self *NTFSFileInfo) Name() string {
 	return self.info.Name
+}
+
+func (self *NTFSFileInfo) UniqueName() string {
+	return self._full_path.String()
 }
 
 func (self *NTFSFileInfo) Mode() os.FileMode {
@@ -252,6 +257,7 @@ func (self *NTFSFileSystemAccessor) ReadDirWithOSPath(
 	return result, nil
 }
 
+// Adapt a ReadSeeker onto the ReadAtter that go-ntfs provides.
 type readAdapter struct {
 	sync.Mutex
 
@@ -286,12 +292,28 @@ func (self *readAdapter) Read(buf []byte) (res int, err error) {
 	}()
 
 	res, err = self.reader.ReadAt(buf, self.pos)
-	self.pos += int64(res)
-
 	// If ReadAt is unable to read anything it means an EOF.
 	if res == 0 {
-		return res, io.EOF
+		// The NTFS cache may be flushed during this read and in this
+		// case the file handle will be closed on us during the
+		// read. This usually shows up as an EOF read with 0 length.
+		// See Issue
+		// https://github.com/Velocidex/velociraptor/issues/2153
+
+		// We catch this issue by issuing one more read just to make
+		// sure. Usually we are wrapping a ReadAtter here and we do
+		// not expect to see a EOF anyway. In the case of NTFS the
+		// extra read will re-open the underlying device file with a
+		// new NTFS context (reparsing the $MFT and purging all the
+		// caches) so the next read will succeed.
+		res, err = self.reader.ReadAt(buf, self.pos)
+		if res == 0 {
+			// Still EOF - give up
+			return res, io.EOF
+		}
 	}
+
+	self.pos += int64(res)
 
 	return res, err
 }
@@ -349,7 +371,7 @@ func (self *NTFSFileSystemAccessor) OpenWithOSPath(
 		accessor = fullpath.DelegateAccessor()
 	}
 
-	// We dont want to open a subpath of the filesyste, instead we
+	// We dont want to open a subpath of the filesystem, instead we
 	// special case this as openning the raw device.
 	if len(fullpath.Components) == 0 {
 		accessor, err := accessors.GetAccessor(accessor, self.scope)
@@ -363,7 +385,7 @@ func (self *NTFSFileSystemAccessor) OpenWithOSPath(
 		}
 
 		reader, err := ntfs.NewPagedReader(
-			utils.ReaderAtter{Reader: file}, 0x1000, 10000)
+			utils.MakeReaderAtter(file), 0x1000, 10000)
 		if err != nil {
 			return nil, err
 		}
@@ -440,6 +462,16 @@ func (self *NTFSFileSystemAccessor) LstatWithOSPath(
 			return nil, err
 		}
 		accessor = fullpath.DelegateAccessor()
+	}
+
+	// Attempting to stat the top level mean that we want to stat the
+	// device itself.
+	if self.device != nil && len(fullpath.Components) == 0 {
+		accessor_obj, err := accessors.GetAccessor(accessor, self.scope)
+		if err != nil {
+			return nil, err
+		}
+		return accessor_obj.LstatWithOSPath(self.device)
 	}
 
 	ntfs_ctx, err := readers.GetNTFSContext(self.scope, device, accessor)
